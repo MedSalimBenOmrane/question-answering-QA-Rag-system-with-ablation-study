@@ -9,3 +9,19 @@ chunking:
     chunk_size_tokens: 200
     overlap_tokens: 20
   markdown: {}
+
+embedding:
+  model_name: BAAI/bge-m3
+  device: cpu
+  batch_size: 32
+
+vectorstore:
+  persist_directory: ./data/chroma
+  collection_name: context_aware_qa
+
+token_counter:
+  provider: hf # tiktoken | hf ; a aligner sur le tokenizer reel du modele Ollama cible
+  tiktoken:
+    encoding: cl100k_base
+  hf:
+    model_name: gpt2

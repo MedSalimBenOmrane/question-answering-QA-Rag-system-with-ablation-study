@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Index vectoriel persistant (Chroma) et cache HF
+data/chroma/
+.cache/
