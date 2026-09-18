@@ -1,1 +1,11 @@
 # Placeholder - configuration par defaut (a completer)
+
+chunking:
+  strategy: fixed # fixed | recursive | markdown
+  fixed:
+    chunk_size_tokens: 200
+    overlap_tokens: 20
+  recursive:
+    chunk_size_tokens: 200
+    overlap_tokens: 20
+  markdown: {}
