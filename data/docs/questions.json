@@ -1,0 +1,24 @@
+{
+  "questions": [
+    {
+      "id": "q1",
+      "question": "If the QRC fails during boot, what is the expected system behavior and recommended recovery steps?"
+    },
+    {
+      "id": "q2",
+      "question": "Explain the ambiguity around the term 'Safe Mode' and how it might affect operator decisions."
+    },
+    {
+      "id": "q3",
+      "question": "What contradictions exist in network policies regarding AI outbound communication?"
+    },
+    {
+      "id": "q4",
+      "question": "Describe the procedure to manually restore communications modules if Isolation Mode was triggered."
+    },
+    {
+      "id": "q5",
+      "question": "Who is authorized to override network restrictions, and what conflicts might arise?"
+    }
+  ]
+}
