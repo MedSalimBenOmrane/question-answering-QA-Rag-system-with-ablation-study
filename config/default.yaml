@@ -46,8 +46,9 @@ selection:
   mmr_lambda: 0.7 # utilise seulement si strategy=knapsack_mmr
 
 token_counter:
-  provider: hf # tiktoken | hf ; a aligner sur le tokenizer reel du modele Ollama cible
+  provider: hf # tiktoken | hf
   tiktoken:
     encoding: cl100k_base
   hf:
-    model_name: gpt2
+    # Qwen3 reutilise le tokenizer Qwen2 (meme vocab) : doit rester aligne sur llm.model.
+    model_name: Qwen/Qwen3-1.7B
