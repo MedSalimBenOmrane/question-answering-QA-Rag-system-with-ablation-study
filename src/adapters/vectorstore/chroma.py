@@ -86,6 +86,8 @@ class ChromaVectorStore:
 def create_vectorstore(config: dict[str, Any]) -> ChromaVectorStore:
     """Instancie le VectorStore configure (collection Chroma persistante).
 
+    La telemetrie anonyme de Chroma est desactivee (pas d'appel reseau sortant).
+
     Args:
         config: Section de configuration `vectorstore`. Doit contenir
             `persist_directory` et `collection_name`.
@@ -97,6 +99,7 @@ def create_vectorstore(config: dict[str, Any]) -> ChromaVectorStore:
         KeyError: Si `persist_directory` ou `collection_name` sont absents.
     """
     import chromadb
+    from chromadb.config import Settings
 
     try:
         persist_directory = config["persist_directory"]
@@ -107,5 +110,7 @@ def create_vectorstore(config: dict[str, Any]) -> ChromaVectorStore:
             "'collection_name' sont requis"
         ) from exc
 
-    client = chromadb.PersistentClient(path=persist_directory)
+    client = chromadb.PersistentClient(
+        path=persist_directory, settings=Settings(anonymized_telemetry=False)
+    )
     return ChromaVectorStore(client=client, collection_name=collection_name)

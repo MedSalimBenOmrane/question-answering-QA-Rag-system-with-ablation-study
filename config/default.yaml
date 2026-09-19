@@ -21,6 +21,9 @@ embedding:
     device: cpu
     batch_size: 32
 
+llm:
+  model: qwen3:1.7b # modele Ollama cible (adapter LLM pas encore implemente)
+
 vectorstore:
   persist_directory: ./data/chroma
   collection_name: context_aware_qa

@@ -12,3 +12,7 @@ wheels/
 # Index vectoriel persistant (Chroma) et cache HF
 data/chroma/
 .cache/
+
+# Secrets et logs
+.env
+*.log
