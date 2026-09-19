@@ -166,6 +166,7 @@ class Pipeline:
                 "n_reranked": len(reranked),
                 "n_selected": len(selected),
                 "latency_seconds": round(time.perf_counter() - start, 4),
+                "selected_chunk_texts": [chunk.text for chunk in selected],
             },
         )
 
@@ -188,6 +189,7 @@ class Pipeline:
             meta={
                 "stage": stage,
                 "latency_seconds": round(time.perf_counter() - start, 4),
+                "selected_chunk_texts": [chunk.text for chunk in selected],
                 **(meta or {}),
             },
         )
