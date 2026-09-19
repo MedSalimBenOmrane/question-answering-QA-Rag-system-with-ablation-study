@@ -1,5 +1,11 @@
-"""Tests du TokenCounter concret (tiktoken, HF, factory)."""
+"""Tests du TokenCounter concret (tiktoken, HF, factory) : aucun mock.
 
+Chaque test charge le vrai tokenizer (encodage tiktoken reel, tokenizer HF
+reel via transformers) et verifie le comptage reel de tokens.
+"""
+
+import tiktoken
+import transformers
 import pytest
 
 from src.adapters.llm.token_counter import (
@@ -9,57 +15,49 @@ from src.adapters.llm.token_counter import (
 )
 
 
-class FakeEncoder:
-    """Encodeur factice : 1 token = 1 mot, pour tester le wrapper hors reseau."""
-
-    def encode(self, text: str) -> list[int]:
-        return list(range(len(text.split())))
-
-
 class TestTiktokenTokenCounter:
-    def test_count_with_fake_encoder(self) -> None:
-        counter = TiktokenTokenCounter(FakeEncoder())
-        assert counter.count("un deux trois") == 3
-
-    def test_count_with_real_cl100k_base(self) -> None:
-        tiktoken = pytest.importorskip("tiktoken")
+    def test_count_matches_real_cl100k_base_encoding(self) -> None:
         encoding = tiktoken.get_encoding("cl100k_base")
         counter = TiktokenTokenCounter(encoding)
+
         assert counter.count("hello world") == len(encoding.encode("hello world"))
         assert counter.count("hello world") > 0
 
+    def test_count_is_zero_for_empty_text(self) -> None:
+        counter = TiktokenTokenCounter(tiktoken.get_encoding("cl100k_base"))
+        assert counter.count("") == 0
+
 
 class TestHFTokenCounter:
-    def test_count_with_fake_tokenizer(self) -> None:
-        counter = HFTokenCounter(FakeEncoder())
-        assert counter.count("un deux trois quatre") == 4
-
-    def test_count_with_real_gpt2_tokenizer(self) -> None:
-        transformers = pytest.importorskip("transformers")
+    def test_count_matches_real_gpt2_tokenizer(self) -> None:
         tokenizer = transformers.AutoTokenizer.from_pretrained("gpt2")
         counter = HFTokenCounter(tokenizer)
+
         assert counter.count("hello world") == len(tokenizer.encode("hello world"))
         assert counter.count("hello world") > 0
 
+    def test_count_is_zero_for_empty_text(self) -> None:
+        tokenizer = transformers.AutoTokenizer.from_pretrained("gpt2")
+        counter = HFTokenCounter(tokenizer)
+        assert counter.count("") == 0
+
 
 class TestCreateTokenCounter:
-    def test_dispatches_to_tiktoken(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "tiktoken.get_encoding", lambda name: FakeEncoder(), raising=False
+    def test_dispatches_to_tiktoken_and_counts_for_real(self) -> None:
+        counter = create_token_counter(
+            {"provider": "tiktoken", "tiktoken": {"encoding": "cl100k_base"}}
         )
-        counter = create_token_counter({"provider": "tiktoken", "tiktoken": {"encoding": "cl100k_base"}})
         assert isinstance(counter, TiktokenTokenCounter)
-        assert counter.count("a b c") == 3
 
-    def test_dispatches_to_hf(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(
-            "transformers.AutoTokenizer.from_pretrained",
-            lambda name: FakeEncoder(),
-            raising=False,
-        )
+        encoding = tiktoken.get_encoding("cl100k_base")
+        assert counter.count("hello world") == len(encoding.encode("hello world"))
+
+    def test_dispatches_to_hf_and_counts_for_real(self) -> None:
         counter = create_token_counter({"provider": "hf", "hf": {"model_name": "gpt2"}})
         assert isinstance(counter, HFTokenCounter)
-        assert counter.count("a b c") == 3
+
+        tokenizer = transformers.AutoTokenizer.from_pretrained("gpt2")
+        assert counter.count("hello world") == len(tokenizer.encode("hello world"))
 
     def test_missing_provider_raises(self) -> None:
         with pytest.raises(KeyError):
