@@ -11,9 +11,15 @@ chunking:
   markdown: {}
 
 embedding:
-  model_name: BAAI/bge-m3
-  device: cpu
-  batch_size: 32
+  provider: bge_m3 # bge_m3 | multilingual_e5
+  bge_m3:
+    model_name: BAAI/bge-m3
+    device: cpu
+    batch_size: 32
+  multilingual_e5:
+    model_name: intfloat/multilingual-e5-base
+    device: cpu
+    batch_size: 32
 
 vectorstore:
   persist_directory: ./data/chroma
