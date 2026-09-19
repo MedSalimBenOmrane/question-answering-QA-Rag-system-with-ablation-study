@@ -1,10 +1,13 @@
-.PHONY: install test index run
+.PHONY: install test clean-data index run
 
 install:
 	uv sync
 
 test:
 	uv run pytest
+
+clean-data:
+	uv run python data_cleaning/clean_corpus.py
 
 index:
 	uv run python -m src.cli index

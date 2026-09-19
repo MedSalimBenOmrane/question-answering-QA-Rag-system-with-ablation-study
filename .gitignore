@@ -16,3 +16,6 @@ data/chroma/
 # Secrets et logs
 .env
 *.log
+
+# Sauvegarde des fichiers originaux avant nettoyage (data_cleaning/clean_corpus.py)
+data_cleaning/originals_backup/
