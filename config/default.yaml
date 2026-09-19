@@ -25,6 +25,14 @@ vectorstore:
   persist_directory: ./data/chroma
   collection_name: context_aware_qa
 
+retrieval:
+  hybrid: true
+  strategy: dense # dense | bm25 ; utilise seulement si hybrid=false
+  bm25:
+    k1: 1.5
+    b: 0.75
+  rrf_k: 60
+
 token_counter:
   provider: hf # tiktoken | hf ; a aligner sur le tokenizer reel du modele Ollama cible
   tiktoken:
