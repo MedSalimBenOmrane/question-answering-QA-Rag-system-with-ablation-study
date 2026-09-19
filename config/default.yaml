@@ -38,6 +38,10 @@ reranking:
   model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
   device: cpu
 
+selection:
+  strategy: knapsack_mmr # topk | knapsack | knapsack_mmr
+  mmr_lambda: 0.7 # utilise seulement si strategy=knapsack_mmr
+
 token_counter:
   provider: hf # tiktoken | hf ; a aligner sur le tokenizer reel du modele Ollama cible
   tiktoken:
