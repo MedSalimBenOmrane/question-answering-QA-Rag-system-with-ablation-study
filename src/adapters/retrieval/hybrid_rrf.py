@@ -44,10 +44,20 @@ class HybridRRFRetriever:
 
         for results in (dense_results, sparse_results):
             for rank, scored in enumerate(results, start=1):
-                chunk_by_id[scored.chunk.id] = scored.chunk
-                fused_scores[scored.chunk.id] = fused_scores.get(
-                    scored.chunk.id, 0.0
-                ) + 1.0 / (self._rrf_k + rank)
+                chunk_id = scored.chunk.id
+                # Si un chunk est retrouve par les deux retrievers, garder de
+                # preference l'exemplaire qui porte un embedding (cote dense) :
+                # le sparse (ex: BM25) n'en porte pas, et l'ecraser ferait
+                # perdre metadata["embedding"], requis par la strategie de
+                # selection knapsack_mmr (cf. src/domain/budget.py).
+                existing = chunk_by_id.get(chunk_id)
+                if existing is None or (
+                    "embedding" not in existing.metadata and "embedding" in scored.chunk.metadata
+                ):
+                    chunk_by_id[chunk_id] = scored.chunk
+                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + 1.0 / (
+                    self._rrf_k + rank
+                )
 
         ranked_ids = sorted(fused_scores, key=lambda cid: fused_scores[cid], reverse=True)
         return [

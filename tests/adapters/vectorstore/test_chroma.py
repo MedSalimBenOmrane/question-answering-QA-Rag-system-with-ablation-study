@@ -73,6 +73,17 @@ class TestChromaVectorStore:
         store.add([], [])
         assert store.search(_QUERY_VECTOR, k=5) == []
 
+    def test_search_includes_embedding_in_metadata(self, tmp_path: Path) -> None:
+        """Requis par la strategie de selection knapsack_mmr (domain/budget.py)."""
+        store = _make_store(tmp_path)
+        store.add(_CHUNKS, _VECTORS)
+
+        results = store.search(_QUERY_VECTOR, k=3)
+
+        by_id = {r.chunk.id: r.chunk for r in results}
+        assert by_id["c1"].metadata["embedding"] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+        assert by_id["c2"].metadata["embedding"] == pytest.approx([0.0, 1.0, 0.0, 0.0])
+
 
 class TestCreateVectorstore:
     def test_creates_persistent_store_from_config(self, tmp_path: Path) -> None:

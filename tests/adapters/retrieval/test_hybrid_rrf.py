@@ -60,3 +60,20 @@ class TestHybridRRFRetriever:
 
         assert all(s > 0 for s in scores)
         assert scores == sorted(scores, reverse=True)
+
+    def test_chunk_found_by_both_retrievers_keeps_its_embedding(
+        self,
+        mini_corpus: list[Chunk],
+        chroma_store: ChromaVectorStore,
+        bge_m3_embedder: BgeM3Embedder,
+    ) -> None:
+        """BM25 n'a pas d'embedding : la fusion ne doit pas ecraser celui du
+        dense pour un chunk trouve par les deux (requis par knapsack_mmr)."""
+        retriever = _build_hybrid(mini_corpus, chroma_store, bge_m3_embedder)
+
+        results = retriever.retrieve("xenon fuel for the ion thrusters", k=4)
+
+        assert any("embedding" in r.chunk.metadata for r in results)
+        for r in results:
+            if "embedding" in r.chunk.metadata:
+                assert len(r.chunk.metadata["embedding"]) > 0

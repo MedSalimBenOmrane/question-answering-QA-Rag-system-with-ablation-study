@@ -58,23 +58,34 @@ class ChromaVectorStore:
 
         Returns:
             La liste des k chunks les plus pertinents, avec leur score de
-            similarite cosinus (plus haut = plus pertinent).
+            similarite cosinus (plus haut = plus pertinent). Le vecteur
+            d'embedding de chaque chunk est inclus dans
+            `chunk.metadata["embedding"]` (requis par la strategie de
+            selection `knapsack_mmr`, cf. `src/domain/budget.py`).
         """
         if k <= 0:
             return []
 
-        result = self._collection.query(query_embeddings=[query_vector], n_results=k)
+        result = self._collection.query(
+            query_embeddings=[query_vector],
+            n_results=k,
+            include=["documents", "metadatas", "distances", "embeddings"],
+        )
 
         ids = result["ids"][0]
         documents = result["documents"][0]
         metadatas = result["metadatas"][0]
         distances = result["distances"][0]
+        embeddings = result["embeddings"][0]
 
         scored_chunks: list[ScoredChunk] = []
-        for chunk_id, text, raw_metadata, distance in zip(ids, documents, metadatas, distances):
+        for chunk_id, text, raw_metadata, distance, embedding in zip(
+            ids, documents, metadatas, distances, embeddings
+        ):
             metadata = dict(raw_metadata)
             source = metadata.pop("source")
             n_tokens = metadata.pop("n_tokens")
+            metadata["embedding"] = list(embedding)
             chunk = Chunk(
                 id=chunk_id, text=text, source=source, n_tokens=n_tokens, metadata=metadata
             )

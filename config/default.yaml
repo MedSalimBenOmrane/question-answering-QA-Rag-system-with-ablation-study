@@ -1,5 +1,20 @@
 # Placeholder - configuration par defaut (a completer)
 
+# Budget strict de la section 2 du CLAUDE.md : 1024 tokens par question.
+budget:
+  total: 1024
+  reserve_answer: 200 # tokens reserves a la generation de la reponse
+
+pipeline:
+  retrieve_k: 10 # nombre de chunks recuperes par le Retriever
+  rerank_top_n: 5 # nombre de chunks conserves apres reranking
+
+guardrails:
+  input:
+    max_length: 2000 # caracteres, question utilisateur
+  output:
+    max_length: 4000 # caracteres, reponse du LLM
+
 chunking:
   strategy: fixed # fixed | recursive | markdown
   fixed:
@@ -28,6 +43,7 @@ llm:
 vectorstore:
   persist_directory: ./data/chroma
   collection_name: context_aware_qa
+  chunks_path: ./data/chunks.json # manifeste des chunks indexes (necessaire au retriever BM25/hybride)
 
 retrieval:
   hybrid: true
