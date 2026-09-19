@@ -1,13 +1,12 @@
-"""Tests de l'adapter Ollama (port LLM) : build_prompt, wiring config, system prompt.
+"""Tests de l'adapter Ollama (port LLM) : build_prompt, wiring config, system prompt,
+et generation reelle via un serveur Ollama local.
 
-Aucun test n'appelle un serveur Ollama reel : ni ce sandbox ni la session de
-build n'ont Ollama installe/demarre, et aucun modele n'est encore telecharge
-(cf. les commandes `ollama pull` fournies a l'utilisateur). Simuler cet appel
-reseau irait a l'encontre de la consigne "aucun mock" plutot que la respecter :
-on ne teste donc que ce qui est reellement executable ici (assemblage du
-prompt, lecture de la config, contenu du system prompt), et le test de
-`OllamaLLM.generate()` en conditions reelles reste a faire par l'utilisateur
-une fois les modeles telecharges (voir le resume de reponse).
+`TestOllamaLLMRealGeneration` appelle vraiment `OllamaLLM.generate()` : ces
+tests necessitent un serveur Ollama local actif (`ollama serve`, generalement
+demarre automatiquement par l'installeur) avec le modele "qwen3:1.7b" deja
+pulle (`ollama pull qwen3:1.7b`). Aucune simulation : si le serveur n'est pas
+joignable, ces tests echouent avec une erreur de connexion plutot que d'etre
+mockes.
 """
 
 from pathlib import Path
@@ -152,3 +151,47 @@ class TestExperimentConfigsOnlyChangeModel:
         assert set(override.keys()) == {"llm"}
         assert set(override["llm"].keys()) == {"model"}
         assert override["llm"]["model"] == expected_model
+
+
+class TestOllamaLLMRealGeneration:
+    """Generation reelle via un serveur Ollama local (qwen3:1.7b, deja pulle).
+
+    Assertions volontairement souples (contenu factuel attendu, pas de
+    correspondance exacte de formulation) : un petit modele instruction-tuned
+    peut varier legerement dans sa formulation d'un run a l'autre.
+    """
+
+    def _llm(self) -> OllamaLLM:
+        system_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+        return create_llm({"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt=system_prompt)
+
+    def test_generate_answers_grounded_question_from_context(self) -> None:
+        chunks = [
+            _chunk(
+                "c1",
+                "file01",
+                "The propulsion system uses xenon as fuel for the ion thrusters.",
+                12,
+            )
+        ]
+        prompt = build_prompt(chunks, "What fuel does the propulsion system use?")
+
+        answer = self._llm().generate(prompt)
+
+        assert answer.strip() != ""
+        assert "xenon" in answer.lower()
+
+    def test_generate_abstains_when_context_has_no_answer(self) -> None:
+        chunks = [
+            _chunk(
+                "c1",
+                "file02",
+                "The cafeteria menu today offers pasta and a green salad.",
+                10,
+            )
+        ]
+        prompt = build_prompt(chunks, "What is the capital of France?")
+
+        answer = self._llm().generate(prompt)
+
+        assert "Information non trouvée dans les documents." in answer
