@@ -22,7 +22,8 @@ embedding:
     batch_size: 32
 
 llm:
-  model: qwen3:1.7b # modele Ollama cible (adapter LLM pas encore implemente)
+  model: qwen3:1.7b # modele Ollama cible ; comparaison en section 6.7 via config/experiments/llm_*.yaml
+  temperature: 0.1 # basse : reponses grounded/deterministes, peu d'hallucination
 
 vectorstore:
   persist_directory: ./data/chroma

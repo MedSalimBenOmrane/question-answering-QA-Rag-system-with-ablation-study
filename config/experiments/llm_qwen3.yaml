@@ -1,0 +1,5 @@
+# Override de default.yaml pour l'ablation LLM (section 6.7) : ne change que llm.model.
+# Identique au modele par defaut de default.yaml : inclus pour completer le triplet
+# smollm2 / qwen3 / qwen3.5 compare par le runner du Prompt 13.
+llm:
+  model: qwen3:1.7b
