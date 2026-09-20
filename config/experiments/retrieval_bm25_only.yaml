@@ -1,0 +1,6 @@
+# Override de default.yaml pour l'ablation (eval/run_ablation.py) : variable
+# etudiee = le MODE de retrieval (une seule dimension). Necessite 2 cles
+# (strategy vaut "dense" dans default.yaml) pour isoler le mode bm25 seul.
+retrieval:
+  hybrid: false
+  strategy: bm25

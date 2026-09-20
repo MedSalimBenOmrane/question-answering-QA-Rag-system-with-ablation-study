@@ -1,0 +1,4 @@
+# Override de default.yaml pour l'ablation (eval/run_ablation.py) : ne change que retrieval.hybrid.
+# strategy reste "dense" (deja la valeur par defaut) : hybrid=false + strategy=dense -> dense seul.
+retrieval:
+  hybrid: false

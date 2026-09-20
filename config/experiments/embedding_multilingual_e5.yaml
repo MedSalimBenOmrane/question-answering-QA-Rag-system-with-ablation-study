@@ -1,0 +1,3 @@
+# Override de default.yaml pour l'ablation (eval/run_ablation.py) : ne change que embedding.provider.
+embedding:
+  provider: multilingual_e5
