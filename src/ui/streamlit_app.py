@@ -123,11 +123,15 @@ def render_answer(question: str, answer: Answer, budget_total: int) -> None:
 
     chunk_ids = answer.selected_chunk_ids
     chunk_texts = answer.meta.get("selected_chunk_texts", [])
+    chunk_ranks = answer.meta.get("selected_chunk_ranks", [])
     with st.expander(f"Chunks utilises ({len(chunk_ids)})"):
         if not chunk_ids:
             st.write("Aucun chunk retenu.")
-        for index, (chunk_id, text) in enumerate(zip(chunk_ids, chunk_texts), start=1):
-            st.markdown(f"**Chunk {index}** (`{chunk_id}`)")
+        for index, (chunk_id, text, rank) in enumerate(
+            zip(chunk_ids, chunk_texts, chunk_ranks or [None] * len(chunk_ids)), start=1
+        ):
+            rank_label = f" - Top {rank} au reranking" if rank is not None else ""
+            st.markdown(f"**Chunk {index}** (`{chunk_id}`){rank_label}")
             st.text(text)
 
     st.subheader("Budget de tokens")

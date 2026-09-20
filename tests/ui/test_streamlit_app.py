@@ -141,6 +141,7 @@ class TestStreamlitAppReal:
         # (verifie : absente sur certains runs malgre la consigne systeme).
         assert any(re.search(r"\.md\b", c.value) for c in at.caption)
         assert any("Chunk 1" in text for text in answer_texts)
+        assert any("Top " in text and "reranking" in text for text in answer_texts)
         assert any(len(t.value) > 0 for t in at.text)
 
         progress = at.get("progress")

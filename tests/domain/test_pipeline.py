@@ -123,6 +123,19 @@ class TestPipelineHappyPath:
         assert answer.tokens_used > 0
         assert answer.meta["n_retrieved"] > 0
 
+    def test_selected_chunk_ranks_expose_reranking_order(self) -> None:
+        """`meta["selected_chunk_ranks"]` (affiche "Top N" dans Streamlit)
+        doit donner le rang (1 = le mieux classe par le reranking) de chaque
+        chunk retenu, sans doublon et borne par le nombre de candidats
+        reranked."""
+        pipeline = _build_pipeline()
+        answer = pipeline.run("What fuel does the propulsion system use?")
+
+        ranks = answer.meta["selected_chunk_ranks"]
+        assert len(ranks) == len(answer.selected_chunk_ids)
+        assert len(set(ranks)) == len(ranks)  # pas de doublon
+        assert all(1 <= rank <= answer.meta["n_reranked"] for rank in ranks)
+
     def test_unanswerable_question_abstains_via_llm(self) -> None:
         pipeline = _build_pipeline()
         answer = pipeline.run("What is the capital of France?")

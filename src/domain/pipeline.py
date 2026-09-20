@@ -151,6 +151,12 @@ class Pipeline:
             + self._token_counter.count(prompt)
             + self._token_counter.count(raw_answer)
         )
+        rerank_rank_of = {
+            scored.chunk.id: rank
+            for rank, scored in enumerate(
+                sorted(reranked, key=lambda scored: scored.score, reverse=True), start=1
+            )
+        }
 
         return Answer(
             text=raw_answer,
@@ -165,6 +171,7 @@ class Pipeline:
                 "n_selected": len(selected),
                 "latency_seconds": round(time.perf_counter() - start, 4),
                 "selected_chunk_texts": [chunk.text for chunk in selected],
+                "selected_chunk_ranks": [rerank_rank_of[chunk.id] for chunk in selected],
             },
         )
 
