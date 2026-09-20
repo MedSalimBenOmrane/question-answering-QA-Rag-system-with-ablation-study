@@ -137,17 +137,34 @@ class KnapsackMMRSelector:
 
     Avant d'ajouter un chunk, compare son embedding aux chunks deja
     selectionnes (Maximal Marginal Relevance) : rejette les quasi-duplicats
-    et les chunks dont le score effectif (pertinence - redondance) est negatif.
+    (similarite cosinus > seuil) et les chunks sans pertinence propre
+    (score brut <= 0).
+
+    Note (correction d'un bug reel) : ne rejette PLUS un chunk a score positif
+    sur la base d'un "score effectif" (mmr_lambda * score - (1 - mmr_lambda) *
+    sim_max) devenu negatif. Avec un reranker cross-encoder, les scores sont
+    souvent tres compresses pres de 0 (ex : 0.01) pour un chunk pertinent mais
+    lexicalement eloigne de la requete (typique d'une question
+    multi-documents). Dans ce regime, la moindre similarite cosinus avec un
+    chunk deja selectionne (frequente entre documents d'un meme corpus, meme
+    sans etre un vrai quasi-duplicat) suffisait a faire passer ce score
+    effectif sous 0 et a rejeter un chunk pourtant pertinent, independamment
+    du budget restant (bug reel constate : question multi-documents perdant
+    une source pertinente malgre un budget largement disponible). Le filtrage
+    anti-redondance reste assure par le rejet des quasi-duplicats
+    (`sim_max > _DUPLICATE_SIMILARITY_THRESHOLD`) ; la pertinence minimale est
+    assuree par le rejet des chunks a score brut <= 0.
     """
 
     def __init__(self, mmr_lambda: float) -> None:
         """Initialise le selecteur.
 
         Args:
-            mmr_lambda: Poids de la pertinence face a la diversite dans le
-                score effectif (`mmr_lambda * score - (1 - mmr_lambda) * sim_max`).
-                Proche de 1 : privilegie la pertinence brute. Proche de 0 :
-                privilegie la diversite.
+            mmr_lambda: Conserve pour compatibilite avec la config
+                (`selection.mmr_lambda`) mais n'est plus utilise dans la
+                decision de selection (voir docstring de la classe) : l'ancien
+                score effectif pondere par ce parametre causait un rejet
+                errone de chunks pertinents a score faible.
         """
         self._mmr_lambda = mmr_lambda
 
@@ -176,6 +193,9 @@ class KnapsackMMRSelector:
         total_tokens = 0
 
         for scored in ordered:
+            if scored.score <= 0:
+                continue
+
             embedding = _embedding_of(scored.chunk)
             sim_max = max(
                 (_cosine_similarity(embedding, other) for other in selected_embeddings),
@@ -183,10 +203,6 @@ class KnapsackMMRSelector:
             )
 
             if sim_max > _DUPLICATE_SIMILARITY_THRESHOLD:
-                continue
-
-            effective_score = self._mmr_lambda * scored.score - (1 - self._mmr_lambda) * sim_max
-            if effective_score < 0:
                 continue
 
             if total_tokens + scored.chunk.n_tokens > context_budget:
