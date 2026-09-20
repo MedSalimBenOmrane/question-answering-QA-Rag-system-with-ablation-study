@@ -11,8 +11,20 @@ complet) sont charges une seule fois par processus serveur grace a
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# `streamlit run` execute ce fichier comme script principal : Python ajoute
+# le dossier du script (src/ui/) a sys.path, jamais la racine du projet,
+# quel que soit le repertoire courant depuis lequel la commande est lancee.
+# Sans cette ligne, `from src...` echoue toujours avec
+# "ModuleNotFoundError: No module named 'src'" (verifie en direct, y compris
+# en lancant depuis la racine).
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import streamlit as st
 
@@ -21,8 +33,6 @@ from src.cli import load_chunks, load_config, load_system_prompt
 from src.domain.models import Answer
 from src.domain.pipeline import Pipeline
 from src.observability.logging import RequestLogger
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # Surchargeable via CONTEXT_AWARE_QA_FEEDBACK_LOG_PATH (tests d'integration :
 # AppTest execute le script dans un contexte isole que monkeypatch.setattr ne
 # peut pas atteindre, mais qui lit bien os.environ a chaque execution).

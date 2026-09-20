@@ -8,7 +8,11 @@ indexe et Ollama actif.
 """
 
 import json
+import os
 import re
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -17,7 +21,8 @@ from streamlit.testing.v1 import AppTest
 from src.domain.models import Answer
 from src.ui.streamlit_app import FEEDBACK_LEVELS, log_feedback
 
-_APP_PATH = str(Path(__file__).resolve().parents[2] / "src" / "ui" / "streamlit_app.py")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_APP_PATH = str(_REPO_ROOT / "src" / "ui" / "streamlit_app.py")
 
 _ANSWER = Answer(
     text="The boot halts at phase 3. [Source: boot_sequence.md]",
@@ -60,6 +65,45 @@ class TestLogFeedback:
         path = tmp_path / "nested" / "feedback.jsonl"
         log_feedback("q", _ANSWER, "Medium", path=path)
         assert path.exists()
+
+
+class TestRealLaunchImports:
+    """Verifie que le script s'importe sans ModuleNotFoundError quand il est
+    lance comme `streamlit run` le ferait reellement : un sous-processus frais,
+    sans le sys.path deja enrichi par pytest (pythonpath = ["."] dans
+    pyproject.toml masque ce bug dans tous les tests bases sur AppTest,
+    execute dans le MEME process que pytest - regression reelle constatee :
+    `streamlit run src/ui/streamlit_app.py` echouait avec "No module named
+    'src'", y compris lance depuis la racine du projet)."""
+
+    @staticmethod
+    def _assert_no_module_not_found_error(cwd: Path, script_arg: str) -> None:
+        env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        proc = subprocess.Popen(
+            [sys.executable, script_arg],
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            time.sleep(4)  # largement au-dela de l'import, pas assez pour finir de charger les modeles
+        finally:
+            proc.terminate()
+            try:
+                _, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                _, stderr = proc.communicate()
+
+        assert "ModuleNotFoundError: No module named 'src'" not in stderr, stderr
+
+    def test_no_module_not_found_when_launched_from_repo_root(self) -> None:
+        self._assert_no_module_not_found_error(_REPO_ROOT, _APP_PATH)
+
+    def test_no_module_not_found_when_launched_from_script_directory(self) -> None:
+        self._assert_no_module_not_found_error(Path(_APP_PATH).parent, Path(_APP_PATH).name)
 
 
 class TestStreamlitAppReal:
