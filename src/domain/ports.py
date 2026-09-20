@@ -2,8 +2,6 @@
 
 Ce module definit les CONTRATS (interfaces) sous forme de `typing.Protocol`
 que doivent respecter les adapters. Aucune implementation concrete ici.
-
-Ne pas modifier ces interfaces sans validation explicite (cf. CLAUDE.md).
 """
 
 from typing import Protocol

@@ -1,7 +1,7 @@
 """Adapter LLM base sur Ollama (modele local, port `LLM`).
 
 Le modele et la temperature sont LUS DEPUIS LA CONFIG (jamais codes en dur) :
-comparer plusieurs LLM (section 6.7 - smollm2:1.7b, qwen3:1.7b, qwen3.5:2b)
+comparer plusieurs LLM ( smollm2:1.7b, qwen3:1.7b, qwen3.5:2b)
 revient donc a changer `llm.model` dans la config (voir
 `config/experiments/llm_*.yaml`), jamais a toucher ce fichier.
 

@@ -1,0 +1,56 @@
+- id: q1
+  question: "If the QRC fails during boot, what is the expected system behavior and recommended recovery steps?"
+  type: multi_doc
+  relevant_sources:
+    - boot_sequence.md
+    - long_procedures.md
+    - changelog_v4.md
+  key_points:
+    - "If the QRC fails, the boot halts at phase 3 (AI Layer)."
+    - "Recovery follows the emergency procedure: activate SafeBoot via the Maintenance Shell, run init_ai_safe.py, inspect the QRC with 'qrc_diag --trace'."
+    - "If diagnostics fail: disable AI Layer autoload completely and reboot with a minimal profile."
+    - "v4.2 fixed the QRC hang during SafeBoot, but SafeBoot may still fail intermittently on initial attempts: monitor QRC logs."
+
+- id: q2
+  question: "Explain the ambiguity around the term 'Safe Mode' and how it might affect operator decisions."
+  type: ambiguity
+  relevant_sources:
+    - ambiguous_safe_mode.md
+    - safe_modes.md
+    - network_policies.md
+  key_points:
+    - "'Safe Mode' has multiple conflicting meanings depending on version/context: a diagnostic state freezing AI (firmware v3.x), Isolation Mode (cuts external communication), and a low-power state with network bridges active."
+    - "It differs from Isolation, even though it is sometimes used interchangeably in legacy docs."
+    - "Operator impact: risk of leaving the system in an unintended state; operators must confirm the system version and exact meaning before executing Safe Mode commands."
+
+- id: q3
+  question: "What contradictions exist in network policies regarding AI outbound communication?"
+  type: contradiction
+  relevant_sources:
+    - network_policies.md
+  key_points:
+    - "AI modules must not initiate outbound connections without Commander override."
+    - "Contradiction: some docs say Isolation disables all outbound traffic, while others note internal telemetry uplinks are exempt/allowed."
+    - "v3.x firmware mistakenly allowed redundant outbound packets (leaks), fixed by Patch 7-F."
+    - "Emergency overrides can bypass all network restrictions (Commander or AI Ethics Officer only)."
+
+- id: q4
+  question: "Describe the procedure to manually restore communications modules if Isolation Mode was triggered."
+  type: factual_specific
+  relevant_sources:
+    - long_procedures.md
+  key_points:
+    - "Emergency procedure, step 7: manually restore communications modules if Isolation Mode was triggered."
+    - "Step 8: re-enable the AI Layer only after a successful network sync."
+    - "The document only provides this high-level step: do not invent sub-steps."
+
+- id: q5
+  question: "Who is authorized to override network restrictions, and what conflicts might arise?"
+  type: multi_doc
+  relevant_sources:
+    - network_policies.md
+    - staff_bios.md
+  key_points:
+    - "Authorized: the Commander (Cmdr. Zhi Morales) and the AI Ethics Officer (Dr. Laren Doss) can bypass restrictions via emergency overrides; the AI needs a Commander override for outbound connections."
+    - "Conflict: Morales frequently overrides AI routines (favoring efficiency over protocol), causing QRC conflicts."
+    - "Doss advocates strict limits on AI autonomy: the two authorized roles hold opposing philosophies."

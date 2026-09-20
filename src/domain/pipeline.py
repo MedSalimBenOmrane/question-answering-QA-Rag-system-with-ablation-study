@@ -4,14 +4,12 @@ adapters concrets ni aucune bibliotheque externe.
 Chaine : guardrail_input -> retrieve -> rerank -> (context_budget) -> select
 -> assemble prompt -> llm -> guardrail_output -> Answer.
 
-Note d'architecture : CLAUDE.md demande a la fois "domain/ pur, sans
-dependance externe" et une orchestration "LangChain (LCEL)". Ces deux regles
+Note d'architecture : une orchestration "LangChain (LCEL)". Ces deux regles
 se contredisent pour ce fichier explicitement place dans domain/. Le choix
 fait ici privilegie la purete du domaine (regle sans exception dans le
-CLAUDE.md) : ce pipeline est une composition lineaire de pure Python (aucun
+: ce pipeline est une composition lineaire de pure Python (aucun
 import LangChain). Rien n'empeche une future couche d'orchestration LCEL
-d'envelopper `Pipeline.run` dans `src/application/` si necessaire - a
-confirmer avec l'utilisateur.
+d'envelopper `Pipeline.run` dans `src/application/
 
 Toutes les dependances (ports + fonction d'assemblage de prompt + system
 prompt deja charge) sont injectees au constructeur : ce module ne fait ni
