@@ -22,8 +22,10 @@ from src.domain.pipeline import ABSTENTION_TEXT, Pipeline, PipelineConfig
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SYSTEM_PROMPT = (_REPO_ROOT / "src" / "prompts" / "system.txt").read_text(encoding="utf-8")
-# verifie : 453 tokens cl100k_base (recalibre apres l'ajout des regles 6/7/8
-# de completude/precision/ignorer-le-bruit du system prompt)
+# verifie : 273 tokens cl100k_base (system prompt condense pour recuperer du
+# budget de contexte, cf. fix recall q1 : le prompt avait gonfle a 453
+# tokens a force d'ajouter des regles, ce qui affamait le budget disponible
+# pour les chunks pertinents sur les questions multi-documents)
 
 _CORPUS = [
     Chunk(
@@ -87,7 +89,7 @@ class TestPipelineGuardrailInput:
 
 class TestPipelineBudget:
     def test_budget_exhausted_abstains_without_calling_llm(self) -> None:
-        # system prompt seul (453 tokens) > budget_total : context_budget <= 0 d'office
+        # system prompt seul (273 tokens) > budget_total : context_budget <= 0 d'office
         pipeline = _build_pipeline(budget_total=10, reserve_answer=5)
         answer = pipeline.run("What fuels the thrusters?")
 
@@ -96,9 +98,9 @@ class TestPipelineBudget:
         assert answer.meta["context_budget"] <= 0
 
     def test_selection_never_exceeds_a_tight_positive_budget(self) -> None:
-        # calibre pour que context_budget = 486 - 453(system) - 8(question) - 10(reserve) = 15 :
+        # calibre pour que context_budget = 306 - 273(system) - 8(question) - 10(reserve) = 15 :
         # assez pour 1 chunk (~12 tokens) mais pas les 2 (~23 tokens).
-        pipeline = _build_pipeline(budget_total=486, reserve_answer=10)
+        pipeline = _build_pipeline(budget_total=306, reserve_answer=10)
         answer = pipeline.run("What fuel does the propulsion system use?")
 
         assert answer.meta["context_budget"] == 15

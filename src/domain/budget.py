@@ -22,6 +22,21 @@ from src.domain.ports import Selector
 
 _DUPLICATE_SIMILARITY_THRESHOLD = 0.95
 
+# Plancher de pertinence pour `KnapsackMMRSelector` (score de reranking brut,
+# deja normalise en (0, 1) par le reranker). Un sigmoide(logit) ne redescend
+# jamais exactement a 0.0 : pour un chunk hors-sujet, la valeur flottante
+# reelle est de l'ordre de 1e-5 (bruit residuel), jamais 0.0 exactement - le
+# test `score <= 0` ne l'excluait donc jamais. Constate en direct sur un
+# corpus reel : chunks hors-sujet ~1.1e-5 a 1.9e-5, chunks pertinents mais
+# faiblement scores (correspondance lexicale faible) ~0.012 a 0.013 - un
+# ecart de ~3 ordres de grandeur. Ce seuil est place au milieu (sur echelle
+# log) de cet ecart. Sans ce plancher, le tri par densite (score/n_tokens)
+# favorise artificiellement le chunk le plus COURT parmi le bruit (numerateur
+# quasi-nul, denominateur minimal = densite maximale), sans rapport avec sa
+# pertinence reelle (bug reel constate : un chunk hors-sujet mais tres court
+# evincait un chunk pertinent plus long qui ne rentrait plus dans le budget).
+_MIN_RELEVANCE_SCORE = 1e-3
+
 
 def _anti_lost_in_middle(selected: list[Chunk]) -> list[Chunk]:
     """Reordonne pour placer le meilleur en tete et le 2e meilleur en queue.
@@ -138,7 +153,7 @@ class KnapsackMMRSelector:
     Avant d'ajouter un chunk, compare son embedding aux chunks deja
     selectionnes (Maximal Marginal Relevance) : rejette les quasi-duplicats
     (similarite cosinus > seuil) et les chunks sans pertinence propre
-    (score brut <= 0).
+    (score brut < `_MIN_RELEVANCE_SCORE`).
 
     Note (correction d'un bug reel) : ne rejette PLUS un chunk a score positif
     sur la base d'un "score effectif" (mmr_lambda * score - (1 - mmr_lambda) *
@@ -153,7 +168,9 @@ class KnapsackMMRSelector:
     une source pertinente malgre un budget largement disponible). Le filtrage
     anti-redondance reste assure par le rejet des quasi-duplicats
     (`sim_max > _DUPLICATE_SIMILARITY_THRESHOLD`) ; la pertinence minimale est
-    assuree par le rejet des chunks a score brut <= 0.
+    assuree par le rejet des chunks a score brut < `_MIN_RELEVANCE_SCORE`
+    (voir sa docstring : un sigmoide ne redescend jamais exactement a 0.0,
+    un simple `score <= 0` ne filtrait donc jamais le bruit residuel).
     """
 
     def __init__(self, mmr_lambda: float) -> None:
@@ -193,7 +210,7 @@ class KnapsackMMRSelector:
         total_tokens = 0
 
         for scored in ordered:
-            if scored.score <= 0:
+            if scored.score < _MIN_RELEVANCE_SCORE:
                 continue
 
             embedding = _embedding_of(scored.chunk)
