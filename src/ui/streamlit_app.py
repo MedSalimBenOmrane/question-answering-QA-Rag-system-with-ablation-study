@@ -59,7 +59,17 @@ def get_pipeline() -> Pipeline:
     Raises:
         FileNotFoundError: Si le corpus n'a pas encore ete indexe.
     """
-    config = get_config()
+    config = dict(get_config())
+    # `vectorstore.chunks_path`/`persist_directory` sont relatifs dans
+    # default.yaml : resolus contre la racine du projet, jamais contre le
+    # repertoire courant (streamlit peut etre lance depuis n'importe ou,
+    # ex: src/ui/, ce qui casserait un chemin relatif tel quel).
+    vectorstore_config = dict(config["vectorstore"])
+    for key in ("chunks_path", "persist_directory"):
+        path = Path(vectorstore_config[key])
+        if not path.is_absolute():
+            vectorstore_config[key] = str(_REPO_ROOT / path)
+    config["vectorstore"] = vectorstore_config
 
     chunks_path = Path(config["vectorstore"]["chunks_path"])
     if not chunks_path.exists():
