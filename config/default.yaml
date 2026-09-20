@@ -63,8 +63,13 @@ reranking:
   device: cpu
 
 selection:
-  strategy: knapsack_mmr # topk | knapsack | knapsack_mmr
-  mmr_lambda: 0.7 # utilise seulement si strategy=knapsack_mmr
+  strategy: relative_threshold # topk | relative_threshold
+  relative_threshold:
+    min_abs_score: 0.001 # plancher de bruit absolu (score de reranking)
+    log_margin: 1.5 # garde les scores > s_max / 10^log_margin (~32x au defaut)
+    drop_ratio: 0.20 # coupe au decrochage entre deux candidats consecutifs
+    max_chunks: 5 # plafond dur sur le nombre de chunks retenus
+    min_chunks: 1 # ne jamais renvoyer un contexte vide
 
 token_counter:
   provider: hf # tiktoken | hf

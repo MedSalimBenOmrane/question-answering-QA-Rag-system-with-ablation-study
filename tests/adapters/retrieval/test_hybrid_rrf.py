@@ -68,7 +68,8 @@ class TestHybridRRFRetriever:
         bge_m3_embedder: BgeM3Embedder,
     ) -> None:
         """BM25 n'a pas d'embedding : la fusion ne doit pas ecraser celui du
-        dense pour un chunk trouve par les deux (requis par knapsack_mmr)."""
+        dense pour un chunk trouve par les deux (metadonnee conservee pour un
+        usage eventuel par une strategie de selection, cf. domain/budget.py)."""
         retriever = _build_hybrid(mini_corpus, chroma_store, bge_m3_embedder)
 
         results = retriever.retrieve("xenon fuel for the ion thrusters", k=4)

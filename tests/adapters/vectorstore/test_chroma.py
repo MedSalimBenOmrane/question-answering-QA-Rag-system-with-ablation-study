@@ -74,7 +74,9 @@ class TestChromaVectorStore:
         assert store.search(_QUERY_VECTOR, k=5) == []
 
     def test_search_includes_embedding_in_metadata(self, tmp_path: Path) -> None:
-        """Requis par la strategie de selection knapsack_mmr (domain/budget.py)."""
+        """Metadonnee conservee pour un usage eventuel par une strategie de
+        selection (cf. domain/budget.py) - pas de comportement propre a une
+        strategie particuliere, ce test verifie seulement sa presence."""
         store = _make_store(tmp_path)
         store.add(_CHUNKS, _VECTORS)
 

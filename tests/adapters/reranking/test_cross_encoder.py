@@ -78,9 +78,11 @@ class TestCrossEncoderReranker:
     def test_scores_are_normalized_between_zero_and_one(
         self, cross_encoder_model: CrossEncoder
     ) -> None:
-        """Le score brut du cross-encoder n'est pas borne (logit) ; une fois
-        normalise, KnapsackMMRSelector peut evaluer un score effectif sans
-        rejeter a tort un chunk pertinent (bug reel constate en production)."""
+        """Le score brut du cross-encoder n'est pas borne (logit) ; sans
+        normalisation, un selecteur en aval comparant des scores (seuils
+        absolus/relatifs) pourrait mal se comporter sur un score negatif
+        (bug reel constate en production avec une precedente strategie de
+        selection)."""
         reranker = CrossEncoderReranker(model=cross_encoder_model)
         # requete hors-sujet : le cross-encoder doit donner un score brut tres
         # negatif pour ces chunks, ce qui aurait pu produire un score final < 0

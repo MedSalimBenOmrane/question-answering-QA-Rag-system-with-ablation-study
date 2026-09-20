@@ -48,8 +48,8 @@ class HybridRRFRetriever:
                 # Si un chunk est retrouve par les deux retrievers, garder de
                 # preference l'exemplaire qui porte un embedding (cote dense) :
                 # le sparse (ex: BM25) n'en porte pas, et l'ecraser ferait
-                # perdre metadata["embedding"], requis par la strategie de
-                # selection knapsack_mmr (cf. src/domain/budget.py).
+                # perdre metadata["embedding"], disponible pour un usage
+                # eventuel par une strategie de selection (cf. src/domain/budget.py).
                 existing = chunk_by_id.get(chunk_id)
                 if existing is None or (
                     "embedding" not in existing.metadata and "embedding" in scored.chunk.metadata

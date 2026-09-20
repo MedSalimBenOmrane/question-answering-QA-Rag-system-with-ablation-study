@@ -60,8 +60,8 @@ class ChromaVectorStore:
             La liste des k chunks les plus pertinents, avec leur score de
             similarite cosinus (plus haut = plus pertinent). Le vecteur
             d'embedding de chaque chunk est inclus dans
-            `chunk.metadata["embedding"]` (requis par la strategie de
-            selection `knapsack_mmr`, cf. `src/domain/budget.py`).
+            `chunk.metadata["embedding"]`, disponible pour un usage eventuel
+            par une strategie de selection (cf. `src/domain/budget.py`).
         """
         if k <= 0:
             return []

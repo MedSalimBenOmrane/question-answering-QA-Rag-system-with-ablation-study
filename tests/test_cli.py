@@ -2,7 +2,7 @@
 
 Aucun mock : vrai chunking, vrai embedder BGE-M3, vrai Chroma, vrai
 retrieval hybride (dense + BM25 fusionnes par RRF), vrai reranking
-cross-encoder, vraie selection knapsack_mmr, vrai serveur Ollama
+cross-encoder, vraie selection (config/default.yaml), vrai serveur Ollama
 (qwen3:1.7b) - c'est la config par defaut du projet (config/default.yaml)
 utilisee telle quelle ; seuls les chemins de persistance sont rediriges
 vers un dossier temporaire pour isoler le test du vrai data/chroma.

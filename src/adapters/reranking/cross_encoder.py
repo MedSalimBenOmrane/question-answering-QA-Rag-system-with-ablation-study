@@ -6,13 +6,12 @@ ensemble : plus couteux, mais plus precis pour reordonner un petit nombre de
 candidats deja retrouves par le retrieval.
 
 Le score brut d'un cross-encoder n'est PAS borne (logit) : peut etre tres
-negatif pour une paire peu pertinente. Or `KnapsackMMRSelector` (domain/
-budget.py) rejette tout chunk dont le score effectif
-(mmr_lambda * score - ...) est negatif, en supposant implicitement un score
-deja normalise entre 0 et 1. Sans normalisation ici, un cross-encoder au
-score negatif fait rejeter des chunks pertinents independamment du budget
-restant (bug reel constate). D'ou la sigmoide appliquee avant de renvoyer
-le score.
+negatif pour une paire peu pertinente. Un selecteur en aval (domain/budget.py
+ou domain/selection.py) qui compare des scores (seuils absolus/relatifs)
+suppose implicitement un score deja normalise, positif. Sans normalisation
+ici, un score negatif pouvait faire mal se comporter ce type de comparaison
+independamment du budget restant (bug reel constate avec une precedente
+strategie de selection). D'ou la sigmoide appliquee avant de renvoyer le score.
 """
 
 import math

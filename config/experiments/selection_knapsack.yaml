@@ -1,3 +1,0 @@
-# Override de default.yaml pour l'ablation (eval/run_ablation.py) : ne change que selection.strategy.
-selection:
-  strategy: knapsack
