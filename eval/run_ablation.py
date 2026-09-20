@@ -56,7 +56,7 @@ from typing import Any
 import yaml
 
 SEED = 42
-N_REPETITIONS = 3
+N_REPETITIONS = 1  # temporaire (demande utilisateur) : 1 run d'essai avant les 3 repetitions definitives
 _SIGNIFICANCE_STD_MULTIPLIER = 2
 _MIN_VALID_CONTEXT_RECALL = 0.98
 _NDCG_K = 10
