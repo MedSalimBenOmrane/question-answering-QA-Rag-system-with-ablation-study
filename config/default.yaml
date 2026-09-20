@@ -66,8 +66,17 @@ selection:
   strategy: relative_threshold # topk | relative_threshold
   relative_threshold:
     min_abs_score: 0.001 # plancher de bruit absolu (score de reranking)
-    log_margin: 1.5 # garde les scores > s_max / 10^log_margin (~32x au defaut)
-    drop_ratio: 0.20 # coupe au decrochage entre deux candidats consecutifs
+    # log_margin=2.0/drop_ratio=0.02 (au lieu de 1.5/0.20) : calibre pour ce
+    # reranker sur ce corpus - les scores "faibles mais reels" (chunks
+    # pertinents mais lexicalement eloignes de la question, ex: changelog_v4.md
+    # pour q1 a 0.0126, staff_bios.md pour q5 a 0.0274) sont ~15-25x plus bas
+    # que le meilleur score de leur question, bien au-dela de ce que
+    # log_margin=1.5/drop_ratio=0.20 laissait passer (bug reel constate :
+    # ces sources manquaient malgre un score de reranking non-bruit reel).
+    # Le bruit reel (~1e-5) reste 500x+ sous ces scores faibles : toujours
+    # filtre par min_abs_score et par ce plancher relatif, marge confortable.
+    log_margin: 2.0 # garde les scores > s_max / 10^log_margin (~100x au defaut)
+    drop_ratio: 0.02 # coupe au decrochage entre deux candidats consecutifs
     max_chunks: 5 # plafond dur sur le nombre de chunks retenus
     min_chunks: 1 # ne jamais renvoyer un contexte vide
 
