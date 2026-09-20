@@ -53,8 +53,18 @@ class TestBuildPrompt:
         ]
         prompt = build_prompt(chunks, "q")
 
-        assert prompt.index("Chunk 1") < prompt.index("Chunk 2")
-        assert prompt.index("Chunk 1") < prompt.index("[Source: file01]")
+        assert prompt.index("(excerpt 1)") < prompt.index("(excerpt 2)")
+        assert prompt.index("[Source: file01]") < prompt.index("(excerpt 1)")
+
+    def test_source_citation_tag_comes_before_excerpt_number(self) -> None:
+        """Le tag [Source: ...] precede le numero d'extrait (pas l'inverse) :
+        evite qu'un petit LLM confonde le numero d'ordre avec l'identifiant
+        de citation attendu (bug reel constate : citait "[Source: chunk1]"
+        au lieu du vrai nom de fichier)."""
+        chunks = [_chunk("c1", "file01", "first", 5)]
+        prompt = build_prompt(chunks, "q")
+
+        assert prompt.index("[Source: file01]") < prompt.index("(excerpt 1)")
 
     def test_empty_chunks_still_contains_question(self) -> None:
         prompt = build_prompt([], "orphan question")

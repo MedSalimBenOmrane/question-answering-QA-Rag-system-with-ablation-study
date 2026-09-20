@@ -28,10 +28,17 @@ def build_prompt(chunks: list[Chunk], question: str) -> str:
 
     Returns:
         Le texte du prompt, avec chaque chunk numerote et attribue a sa source
-        au format de citation attendu du LLM (ex: "Chunk 1 [Source: file01]\\n<texte>").
+        au format de citation attendu du LLM (ex: "[Source: file01] (excerpt 1)\\n<texte>").
+
+    Note (correction d'un bug reel) : le tag de citation `[Source: ...]` est
+    place EN PREMIER, avant le numero d'extrait (auparavant "Chunk N
+    [Source: ...]"). Avec l'ancien ordre, le LLM (petit modele local) citait
+    parfois "[Source: chunk1]" au lieu du vrai nom de fichier - confusion
+    entre le numero d'ordre presente juste avant et l'identifiant de citation
+    attendu par le system prompt (regle 4, format `[Source: fileNN]`).
     """
     numbered_context = "\n\n".join(
-        f"Chunk {index} [Source: {chunk.source}]\n{chunk.text}"
+        f"[Source: {chunk.source}] (excerpt {index})\n{chunk.text}"
         for index, chunk in enumerate(chunks, start=1)
     )
     return f"CONTEXT\n{numbered_context}\n\nQUESTION\n{question}\n\nANSWER:"
