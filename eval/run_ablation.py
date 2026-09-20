@@ -1,30 +1,43 @@
 """Etude d'ablation : compare chaque config/experiments/*.yaml au baseline
-(config/default.yaml) sur retrieval + generation, sur les 5 questions du gold
-set, et ecrit un tableau comparatif Markdown + CSV trie.
+(config/default.yaml), sur 4 metriques de retrieval + 2 metriques de
+generation, sur les 5 questions du gold set (chantier "relative_threshold",
+etapes 3+4+5).
 
-Chaque fichier config/experiments/*.yaml ne change QU'UNE variable (une seule
-dimension - parfois 2 cles liees quand c'est necessaire pour isoler cette
-dimension, ex: retrieval.hybrid + retrieval.strategy pour isoler le mode
-"bm25 seul", documente dans le fichier concerne) par rapport a
-config/default.yaml. Un point d'entree unique (`main`) execute TOUTES les
-combinaisons une-variable-a-la-fois trouvees dans config/experiments/,
-couvrant les 6 dimensions du projet : chunking, embedding, retrieval,
-reranking, selection, llm.
+Determinisme (etape 4) :
+- Chaque configuration est executee `N_REPETITIONS` fois (3 par defaut) ; le
+  CSV reporte `<metrique>_mean` et `<metrique>_std`. Les metriques de
+  retrieval (candidate_recall, context_recall, context_precision, ndcg_at_10)
+  sont deterministes (aucun echantillonnage dans retrieve/rerank/select) et
+  ont donc un std structurellement nul ; seules `faithfulness` et
+  `answer_correctness` varient reellement d'une repetition a l'autre
+  (echantillonnage du generateur Ollama, cf. `llm.temperature`).
+- `main()` marque NON SIGNIFICATIF (dans le rapport, pas dans ce CSV) tout
+  ecart entre deux runs inferieur a `_SIGNIFICANCE_STD_MULTIPLIER * std`.
+- Le runner REFUSE de demarrer si une experience modifie plus d'UNE SECTION
+  de config de premier niveau (cf. `_refuse_if_multi_section` : interpretation
+  retenue et documentee pour la regle "plus d'une cle", ambigue en l'etat -
+  `retrieval_bm25_only.yaml` touche 2 chemins (retrieval.hybrid,
+  retrieval.strategy) mais une seule SECTION ("retrieval"), necessaires
+  ensemble pour isoler une seule variable, deja documente dans ce fichier).
+- Le juge LLM (cf. `eval.generation_eval.load_judge_llm`) est FIXE pour toute
+  la duree de l'ablation, y compris pour les experiences qui font varier
+  `llm.model` (le generateur evalue) : jamais le meme modele des deux cotes.
+  Logue via `judge_model` dans chaque ligne du CSV.
+- `config_hash` (hash de la config effective fusionnee) et `reranker_version`
+  (nom du modele de reranking) sont aussi logues par ligne.
+- Pre-check obligatoire : `eval.validate_gold.validate_gold()` avant tout run.
 
 (Re)indexation : seuls les experiences qui changent `chunking.*` ou
-`embedding.*` necessitent un nouvel index (les vecteurs/chunks dependent de
-ces deux dimensions) ; chacune obtient son propre index isole
-(data/ablation/<nom>/), construit une seule fois puis reutilise (cache) aux
-executions suivantes. Les autres experiences (retrieval, reranking,
-selection, llm) reutilisent l'index baseline (construit une seule fois si
-absent).
+`embedding.*` necessitent un nouvel index, isole (data/ablation/<nom>/),
+construit une seule fois puis reutilise. Les autres reutilisent l'index
+baseline (construit une seule fois si absent).
 
-Reproductibilite : `random.seed(SEED)` est fixe, et chaque config utilise sa
-propre temperature LLM deja basse (0.1 par defaut). Limite assumee : les
-appels a des API distantes (Ollama, Claude) ne sont pas garantis bit-a-bit
-identiques d'une execution a l'autre (aucun controle direct sur leur RNG
-interne) - la reproductibilite ici porte sur TOUT ce que le projet controle
-(chunking, retrieval, reranking, selection, choix des questions).
+Cout reel : chaque question judgee coute ~1 appel juge pour l'extraction des
+affirmations + 1 appel/affirmation (faithfulness) + 1 appel/key_point
+(answer_correctness) - de l'ordre de 5-10 appels juge par question. Sur 5
+questions x N_REPETITIONS x (1 baseline + len(config/experiments/*.yaml)),
+le nombre total d'appels juge reels est substantiel : verifie/confirme avec
+l'utilisateur avant un lancement complet (cf. rapport de ce chantier).
 
 Usage:
     uv run python -m eval.run_ablation
@@ -32,55 +45,128 @@ Usage:
 
 import copy
 import csv
+import hashlib
 import json
 import random
-from dataclasses import asdict, dataclass
+import statistics
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 SEED = 42
+N_REPETITIONS = 3
+_SIGNIFICANCE_STD_MULTIPLIER = 2
+_MIN_VALID_CONTEXT_RECALL = 0.98
+_NDCG_K = 10
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPERIMENTS_DIR = _REPO_ROOT / "config" / "experiments"
 _ABLATION_DATA_DIR = _REPO_ROOT / "data" / "ablation"
-_DEFAULT_RESULTS_CSV_PATH = _REPO_ROOT / "eval" / "run_ablation_results.csv"
-_CHECKPOINT_PATH = _REPO_ROOT / "eval" / "run_ablation_checkpoint.json"
-
-
-def _load_checkpoint(path: Path = _CHECKPOINT_PATH) -> dict[str, "ExperimentResult"]:
-    """Recharge les experiences deja terminees (relance sans les refaire)."""
-    if not path.exists():
-        return {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return {name: ExperimentResult(**item) for name, item in data.items()}
-
-
-def _save_checkpoint(checkpoint: dict[str, "ExperimentResult"], path: Path = _CHECKPOINT_PATH) -> None:
-    """Sauvegarde apres CHAQUE experience (relance = reprise, pas redemarrage)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {name: asdict(r) for name, r in checkpoint.items()}
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+_DEFAULT_RESULTS_CSV_PATH = _REPO_ROOT / "eval" / "results_v2.csv"
+_CHECKPOINT_PATH = _REPO_ROOT / "eval" / "run_ablation_checkpoint_v2.json"
 
 _REINDEX_SECTIONS = {"chunking", "embedding"}
+
+_RETRIEVAL_METRIC_NAMES = ("candidate_recall", "context_recall", "context_precision", "ndcg_at_10")
+
+
+@dataclass
+class RepetitionResult:
+    """Metriques d'UNE repetition (moyennees sur les 5 questions du gold set)."""
+
+    retrieval_metrics: dict[str, float]
+    faithfulness: float | None
+    n_claims_total: int
+    answer_correctness: float | None
+    n_key_points_covered: int
+    n_key_points_total: int
+    uncovered_key_point_ids: list[str]
+
+
+def _mean_std(values: list[float]) -> tuple[float, float]:
+    """Moyenne et ecart-type (0.0 si un seul point ou tous identiques)."""
+    if not values:
+        return 0.0, 0.0
+    mean = statistics.mean(values)
+    std = statistics.pstdev(values) if len(values) > 1 else 0.0
+    return mean, std
 
 
 @dataclass
 class ExperimentResult:
-    """Resultat agrege (retrieval + generation) pour une config."""
+    """Resultat agrege (sur les repetitions) pour une config."""
 
     name: str
     changed_keys: list[str]
-    retrieval_metrics: dict[str, float]
-    generation_metrics: dict[str, float]
+    config_hash: str
+    judge_model: str
+    reranker_version: str
+    repetitions: list[RepetitionResult] = field(default_factory=list)
+
+    def metric_mean_std(self, metric: str) -> tuple[float, float]:
+        """(mean, std) d'une metrique sur les repetitions.
+
+        Les repetitions ou la metrique est None (ex: `faithfulness` pour un
+        run 100% abstention, ou `answer_correctness` sans key_points) sont
+        ignorees dans le calcul ; retourne (0.0, 0.0) si aucune repetition
+        n'a de valeur definie.
+        """
+        if metric in _RETRIEVAL_METRIC_NAMES:
+            values = [r.retrieval_metrics[metric] for r in self.repetitions]
+        elif metric == "faithfulness":
+            values = [r.faithfulness for r in self.repetitions if r.faithfulness is not None]
+        elif metric == "answer_correctness":
+            values = [r.answer_correctness for r in self.repetitions if r.answer_correctness is not None]
+        else:
+            raise ValueError(f"metrique inconnue : {metric!r}")
+        return _mean_std([v for v in values if v is not None])
 
     @property
-    def composite_score(self) -> float:
-        """Moyenne non ponderee de toutes les metriques (retrieval + generation),
-        toutes deja sur l'echelle [0, 1]. Sert uniquement a trier le tableau."""
-        values = list(self.retrieval_metrics.values()) + list(self.generation_metrics.values())
-        return sum(values) / len(values) if values else 0.0
+    def composite(self) -> float | None:
+        """Score composite pondere, ou None si le run est INVALIDE (garde-fou).
+
+        Garde-fou obligatoire (etape 3.3) : `context_recall_mean < 0.98`
+        rend le run invalide (None), jamais un score bas - une moyenne
+        ponderee simple permettrait a un rappel catastrophique de compenser
+        ailleurs (bug reel constate : `reranking_disabled`, context_recall
+        RAGAS = 0.13 dans l'ancien harness, finissait pourtant devant
+        `llm_smollm` au score composite).
+        `faithfulness_mean` == None (abstention totale) -> composite = 0.0.
+        """
+        context_recall_mean, _ = self.metric_mean_std("context_recall")
+        if context_recall_mean < _MIN_VALID_CONTEXT_RECALL:
+            return None
+
+        faithfulness_mean, _ = self.metric_mean_std("faithfulness")
+        has_faithfulness = any(r.faithfulness is not None for r in self.repetitions)
+        if not has_faithfulness:
+            return 0.0
+
+        context_precision_mean, _ = self.metric_mean_std("context_precision")
+        ndcg_mean, _ = self.metric_mean_std("ndcg_at_10")
+        answer_correctness_mean, _ = self.metric_mean_std("answer_correctness")
+
+        return (
+            0.30 * context_precision_mean
+            + 0.15 * ndcg_mean
+            + 0.30 * faithfulness_mean
+            + 0.25 * answer_correctness_mean
+        )
+
+    @property
+    def all_uncovered_key_point_ids(self) -> list[str]:
+        """Union (dedupliquee, ordre stable) des key_points non couverts sur
+        toutes les repetitions - signal le plus actionnable du rapport."""
+        seen: set[str] = set()
+        out: list[str] = []
+        for rep in self.repetitions:
+            for kp_id in rep.uncovered_key_point_ids:
+                if kp_id not in seen:
+                    seen.add(kp_id)
+                    out.append(kp_id)
+        return out
 
 
 def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +214,28 @@ def changed_keys(override: dict[str, Any], prefix: str = "") -> list[str]:
     return sorted(paths)
 
 
+def refuse_if_multi_section(name: str, override: dict[str, Any]) -> None:
+    """Refuse une experience qui touche plus d'UNE section de config de
+    premier niveau (etape 4 : attribution non ambigue du gain/de la perte a
+    une seule variable).
+
+    Args:
+        name: Nom de l'experience (pour le message d'erreur).
+        override: Le dict d'override de cette experience.
+
+    Raises:
+        ValueError: Si `override` touche plus d'une section de premier niveau.
+    """
+    sections = set(override.keys())
+    if len(sections) > 1:
+        raise ValueError(
+            f"experience {name!r} refusee : modifie {len(sections)} sections de config "
+            f"({', '.join(sorted(sections))}) - une experience doit isoler UNE seule "
+            "variable (une seule section de premier niveau), sinon le gain/la perte "
+            "observe n'est pas attribuable sans ambiguite."
+        )
+
+
 def requires_reindex(override: dict[str, Any]) -> bool:
     """True si `override` touche `chunking.*` ou `embedding.*` (vectorisation
     dependante), donc necessite un nouvel index."""
@@ -142,6 +250,36 @@ def discover_experiment_configs(directory: Path = _EXPERIMENTS_DIR) -> list[Path
 def load_experiment_override(path: Path) -> dict[str, Any]:
     """Charge un fichier d'override d'experience (dict partiel, imbrique)."""
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def config_hash(config: dict[str, Any]) -> str:
+    """Hash court (12 hex) de la config effective, pour tracabilite (etape 4)."""
+    canonical = json.dumps(config, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
+def gold_hash(gold_path: Path) -> str:
+    """Hash court (12 hex) du contenu brut du gold set, pour tracabilite (etape 4)."""
+    return hashlib.sha256(gold_path.read_bytes()).hexdigest()[:12]
+
+
+def _load_checkpoint(path: Path = _CHECKPOINT_PATH) -> dict[str, ExperimentResult]:
+    """Recharge les experiences deja terminees (relance sans les refaire)."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    results: dict[str, ExperimentResult] = {}
+    for name, item in data.items():
+        reps = [RepetitionResult(**rep) for rep in item.pop("repetitions")]
+        results[name] = ExperimentResult(repetitions=reps, **item)
+    return results
+
+
+def _save_checkpoint(checkpoint: dict[str, ExperimentResult], path: Path = _CHECKPOINT_PATH) -> None:
+    """Sauvegarde apres CHAQUE experience (relance = reprise, pas redemarrage)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {name: asdict(r) for name, r in checkpoint.items()}
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def ensure_index(
@@ -183,6 +321,74 @@ def ensure_index(
     return effective_config, chunks
 
 
+def run_repetition(
+    pipeline: Any,
+    gold_retrieval_items: list[Any],
+    gold_generation_cases: list[Any],
+    judge: Any,
+) -> RepetitionResult:
+    """Execute UNE repetition (les 5 questions du gold, retrieval + generation
+    + jugement), et agrege les metriques (moyenne sur les questions).
+
+    Args:
+        pipeline: Le `Pipeline` (domain/pipeline.py) deja construit.
+        gold_retrieval_items: Gold set retrieval (cf. `eval.retrieval_eval.load_gold_set`).
+        gold_generation_cases: Cas de generation positifs (cf.
+            `eval.generation_eval.load_gold_cases`), memes questions.
+        judge: Le LLM juge deja construit (cf. `eval.generation_eval.load_judge_llm`).
+
+    Returns:
+        Le `RepetitionResult` agrege sur les questions positives.
+
+    Note : `gold_retrieval_items` et `gold_generation_cases` doivent
+    correspondre 1:1 par position (memes questions, meme ordre) - le pipeline
+    n'est execute qu'UNE SEULE FOIS par question (jamais deux), les metriques
+    de retrieval ET de generation derivent de la MEME `Answer`.
+    """
+    from eval.generation_eval import answer_correctness, faithfulness
+    from eval.retrieval_eval import evaluate_from_answer, summarize as summarize_retrieval
+
+    retrieval_metrics_per_q = []
+    faithfulness_scores: list[float] = []
+    n_claims_total = 0
+    correctness_scores: list[float] = []
+    n_covered_total = 0
+    n_total_total = 0
+    uncovered_ids: list[str] = []
+
+    for retrieval_item, generation_case in zip(gold_retrieval_items, gold_generation_cases):
+        answer = pipeline.run(retrieval_item.question)
+
+        retrieval_metrics_per_q.append(evaluate_from_answer(answer, retrieval_item, k=_NDCG_K))
+
+        context = "\n\n".join(answer.meta.get("selected_chunk_texts", []))
+        faith = faithfulness(answer.text, context, judge)
+        n_claims_total += faith.n_claims
+        if faith.score is not None:
+            faithfulness_scores.append(faith.score)
+
+        correctness = answer_correctness(
+            generation_case.id, generation_case.key_points, answer.text, judge
+        )
+        n_covered_total += correctness.n_covered
+        n_total_total += correctness.n_total
+        uncovered_ids.extend(correctness.uncovered_key_point_ids)
+        if correctness.score is not None:
+            correctness_scores.append(correctness.score)
+
+    retrieval_metrics = summarize_retrieval(retrieval_metrics_per_q)
+
+    return RepetitionResult(
+        retrieval_metrics=retrieval_metrics,
+        faithfulness=(sum(faithfulness_scores) / len(faithfulness_scores)) if faithfulness_scores else None,
+        n_claims_total=n_claims_total,
+        answer_correctness=(sum(correctness_scores) / len(correctness_scores)) if correctness_scores else None,
+        n_key_points_covered=n_covered_total,
+        n_key_points_total=n_total_total,
+        uncovered_key_point_ids=uncovered_ids,
+    )
+
+
 def run_experiment(
     name: str,
     override: dict[str, Any],
@@ -190,97 +396,90 @@ def run_experiment(
     gold_retrieval_items: list[Any],
     gold_generation_cases: list[Any],
     system_prompt: str,
-    judge_llm_raw: Any,
-    ragas_llm: Any,
-    ragas_embeddings: Any,
+    judge: Any,
+    judge_model: str,
+    n_repetitions: int = N_REPETITIONS,
 ) -> ExperimentResult:
-    """Execute retrieval + generation pour une config et agrege ses metriques.
+    """Execute `n_repetitions` fois retrieval + generation pour une config et
+    agrege ses metriques (moyenne/ecart-type sur les repetitions).
 
     Args:
-        name: Nom de l'experience (nom de fichier sans extension, ou
-            "baseline").
+        name: Nom de l'experience (nom de fichier sans extension, ou "baseline").
         override: Le dict d'override (vide pour le baseline).
         base_config: La config par defaut complete (config/default.yaml).
-        gold_retrieval_items: Gold set retrieval (cf. `eval.retrieval_eval.load_gold_set`).
-        gold_generation_cases: Cas de generation positifs (cf.
-            `eval.generation_eval.load_gold_cases`), memes questions.
+        gold_retrieval_items: Gold set retrieval.
+        gold_generation_cases: Cas de generation positifs, memes questions.
         system_prompt: Contenu du system prompt.
-        judge_llm_raw: LLM juge Claude brut (cf. `eval.generation_eval.load_judge_llm`).
-        ragas_llm: LLM juge deja enveloppe pour RAGAS.
-        ragas_embeddings: Embedder local deja enveloppe pour RAGAS.
+        judge: Le LLM juge deja construit (fixe pour toute l'ablation).
+        judge_model: Nom du modele juge (logue tel quel, pour tracabilite).
+        n_repetitions: Nombre de repetitions (determinisme, etape 4).
 
     Returns:
         Le `ExperimentResult` agrege pour cette experience.
     """
     from src.adapters.embedding.factory import create_embedder
     from src.adapters.retrieval.factory import create_retriever
+    from src.adapters.reranking.factory import create_reranker
     from src.adapters.vectorstore.chroma import create_vectorstore
-    from eval.generation_eval import custom_judge_eval, ragas_eval, run_pipeline_on_cases
-    from eval.retrieval_eval import evaluate as evaluate_retrieval
-    from eval.retrieval_eval import summarize as summarize_retrieval
     from src.application.answer import build_pipeline
+
+    refuse_if_multi_section(name, override)
 
     config = deep_merge(base_config, override)
     needs_reindex = requires_reindex(override)
     config, chunks = ensure_index(config, experiment_name=name, needs_reindex=needs_reindex)
 
-    embedder = create_embedder(config["embedding"])
-    vectorstore = create_vectorstore(config["vectorstore"])
-    retriever = create_retriever(config["retrieval"], embedder, vectorstore, chunks)
-
-    retrieval_results = evaluate_retrieval(retriever, gold_retrieval_items, k=config["pipeline"]["retrieve_k"])
-    retrieval_metrics = summarize_retrieval(retrieval_results)
-
     pipeline = build_pipeline(config, chunks, system_prompt)
-    generation_results = run_pipeline_on_cases(pipeline, gold_generation_cases)
 
-    custom_scores = custom_judge_eval(judge_llm_raw, generation_results)
-    ragas_scores = ragas_eval(generation_results, ragas_llm, ragas_embeddings)
-
-    n = len(generation_results)
-    generation_metrics = {
-        "faithfulness_custom": sum(s.faithfulness for s in custom_scores.values()) / n,
-        "relevancy_custom": sum(s.relevancy for s in custom_scores.values()) / n,
-        "faithfulness_ragas": sum(v["faithfulness"] for v in ragas_scores.values()) / n,
-        "answer_relevancy_ragas": sum(v["answer_relevancy"] for v in ragas_scores.values()) / n,
-        "context_precision_ragas": sum(v["context_precision"] for v in ragas_scores.values()) / n,
-        "context_recall_ragas": sum(v["context_recall"] for v in ragas_scores.values()) / n,
-    }
+    repetitions = [
+        run_repetition(pipeline, gold_retrieval_items, gold_generation_cases, judge)
+        for _ in range(n_repetitions)
+    ]
 
     return ExperimentResult(
         name=name,
         changed_keys=changed_keys(override),
-        retrieval_metrics=retrieval_metrics,
-        generation_metrics=generation_metrics,
+        config_hash=config_hash(config),
+        judge_model=judge_model,
+        reranker_version=config["reranking"].get("model_name", "(disabled)"),
+        repetitions=repetitions,
     )
 
 
 def to_markdown_table(results: list[ExperimentResult]) -> str:
-    """Formate les resultats en tableau Markdown, trie par score composite decroissant."""
-    ordered = sorted(results, key=lambda r: r.composite_score, reverse=True)
+    """Formate les resultats en tableau Markdown, trie par composite decroissant
+    (les runs INVALIDES - composite None - en dernier)."""
+    ordered = sorted(
+        results, key=lambda r: (r.composite is None, -(r.composite or 0.0))
+    )
 
     lines = [
-        "| Experience | Variable(s) changee(s) | Precision@k | Recall@k | MRR | nDCG@k | "
-        "Faith. (custom) | Relev. (custom) | Faith. (RAGAS) | Ans. Relev. | Ctx Prec. | Ctx Recall | Score |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| Experience | Variable changee | Candidate Recall | Context Recall | Context Precision | "
+        "nDCG@10 | Faithfulness | Answer Correctness | Composite |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for r in ordered:
-        rm, gm = r.retrieval_metrics, r.generation_metrics
         changed = ", ".join(r.changed_keys) if r.changed_keys else "(baseline)"
+        cand_r, _ = r.metric_mean_std("candidate_recall")
+        ctx_r, _ = r.metric_mean_std("context_recall")
+        ctx_p, _ = r.metric_mean_std("context_precision")
+        ndcg, _ = r.metric_mean_std("ndcg_at_10")
+        faith, _ = r.metric_mean_std("faithfulness")
+        correct, _ = r.metric_mean_std("answer_correctness")
+        composite = "INVALIDE (recall<0.98)" if r.composite is None else f"**{r.composite:.3f}**"
         lines.append(
-            f"| {r.name} | {changed} | "
-            f"{rm['precision_at_k']:.3f} | {rm['recall_at_k']:.3f} | {rm['mrr']:.3f} | {rm['ndcg_at_k']:.3f} | "
-            f"{gm['faithfulness_custom']:.3f} | {gm['relevancy_custom']:.3f} | "
-            f"{gm['faithfulness_ragas']:.3f} | {gm['answer_relevancy_ragas']:.3f} | "
-            f"{gm['context_precision_ragas']:.3f} | {gm['context_recall_ragas']:.3f} | "
-            f"**{r.composite_score:.3f}** |"
+            f"| {r.name} | {changed} | {cand_r:.3f} | {ctx_r:.3f} | {ctx_p:.3f} | "
+            f"{ndcg:.3f} | {faith:.3f} | {correct:.3f} | {composite} |"
         )
     return "\n".join(lines)
 
 
 def write_csv(results: list[ExperimentResult], path: Path) -> None:
-    """Ecrit les resultats (tries par score composite decroissant) en CSV."""
-    ordered = sorted(results, key=lambda r: r.composite_score, reverse=True)
+    """Ecrit les resultats (tries par composite decroissant, invalides en
+    dernier) en CSV, avec `_mean`/`_std` pour chaque metrique numerique."""
+    ordered = sorted(
+        results, key=lambda r: (r.composite is None, -(r.composite or 0.0))
+    )
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -288,46 +487,45 @@ def write_csv(results: list[ExperimentResult], path: Path) -> None:
         writer.writerow(
             [
                 "name",
-                "changed_keys",
-                "precision_at_k",
-                "recall_at_k",
-                "mrr",
-                "ndcg_at_k",
-                "faithfulness_custom",
-                "relevancy_custom",
-                "faithfulness_ragas",
-                "answer_relevancy_ragas",
-                "context_precision_ragas",
-                "context_recall_ragas",
-                "composite_score",
+                "changed_key",
+                "candidate_recall_mean", "candidate_recall_std",
+                "context_recall_mean", "context_recall_std",
+                "context_precision_mean", "context_precision_std",
+                "ndcg_at_10_mean", "ndcg_at_10_std",
+                "faithfulness_mean", "faithfulness_std",
+                "answer_correctness_mean", "answer_correctness_std",
+                "n_claims_total",
+                "n_key_points_covered",
+                "n_key_points_total",
+                "composite",
+                "config_hash",
+                "judge_model",
             ]
         )
         for r in ordered:
-            rm, gm = r.retrieval_metrics, r.generation_metrics
-            writer.writerow(
-                [
-                    r.name,
-                    ";".join(r.changed_keys),
-                    rm["precision_at_k"],
-                    rm["recall_at_k"],
-                    rm["mrr"],
-                    rm["ndcg_at_k"],
-                    gm["faithfulness_custom"],
-                    gm["relevancy_custom"],
-                    gm["faithfulness_ragas"],
-                    gm["answer_relevancy_ragas"],
-                    gm["context_precision_ragas"],
-                    gm["context_recall_ragas"],
-                    r.composite_score,
-                ]
-            )
+            row: list[Any] = [r.name, ";".join(r.changed_keys) or "(baseline)"]
+            for metric in (*_RETRIEVAL_METRIC_NAMES, "faithfulness", "answer_correctness"):
+                mean, std = r.metric_mean_std(metric)
+                row.extend([mean, std])
+            # n_claims_total / n_key_points_* : sommes sur les repetitions
+            # (pas des metriques [0,1] moyennables comme celles ci-dessus).
+            row.append(sum(rep.n_claims_total for rep in r.repetitions))
+            row.append(sum(rep.n_key_points_covered for rep in r.repetitions))
+            row.append(sum(rep.n_key_points_total for rep in r.repetitions))
+            row.append("" if r.composite is None else r.composite)
+            row.append(r.config_hash)
+            row.append(r.judge_model)
+            writer.writerow(row)
 
 
 def main() -> None:
     """Point d'entree unique : baseline + toutes les config/experiments/*.yaml."""
-    from eval.generation_eval import load_gold_cases, load_ragas_judge_and_embeddings, load_judge_llm
+    from eval.generation_eval import load_gold_cases, load_judge_llm, judge_model_name, negative_cases
     from eval.retrieval_eval import load_gold_set
+    from eval.validate_gold import validate_gold
     from src.cli import load_config, load_system_prompt
+
+    validate_gold()  # pre-check obligatoire (etape 3.4) : arrete tout si le gold est incoherent
 
     random.seed(SEED)
 
@@ -336,12 +534,15 @@ def main() -> None:
     gold_retrieval_items = load_gold_set()
     gold_generation_cases = load_gold_cases()
 
-    judge_llm_raw = load_judge_llm()
-    ragas_llm, ragas_embeddings = load_ragas_judge_and_embeddings(base_config["embedding"])
+    judge = load_judge_llm()
+    judge_model = judge_model_name()
 
     experiments: list[tuple[str, dict[str, Any]]] = [("baseline", {})]
     for path in discover_experiment_configs():
         experiments.append((path.stem, load_experiment_override(path)))
+
+    for name, override in experiments:
+        refuse_if_multi_section(name, override)  # echoue tot, avant tout appel reel
 
     checkpoint = _load_checkpoint()
     if checkpoint:
@@ -359,9 +560,8 @@ def main() -> None:
             gold_retrieval_items=gold_retrieval_items,
             gold_generation_cases=gold_generation_cases,
             system_prompt=system_prompt,
-            judge_llm_raw=judge_llm_raw,
-            ragas_llm=ragas_llm,
-            ragas_embeddings=ragas_embeddings,
+            judge=judge,
+            judge_model=judge_model,
         )
         _save_checkpoint(checkpoint)  # sauvegarde immediate : jamais a refaire
 
@@ -370,6 +570,7 @@ def main() -> None:
 
     write_csv(results, _DEFAULT_RESULTS_CSV_PATH)
     print(f"\nResultats CSV ecrits dans {_DEFAULT_RESULTS_CSV_PATH}")
+    print(f"gold_hash={gold_hash(_REPO_ROOT / 'eval' / 'gold_retrieval.yaml')}")
 
 
 if __name__ == "__main__":

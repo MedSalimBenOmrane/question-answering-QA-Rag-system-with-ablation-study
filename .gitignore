@@ -23,3 +23,7 @@ data/feedback.jsonl
 # Sauvegarde des fichiers originaux avant nettoyage (data_cleaning/clean_corpus.py)
 data_cleaning/originals_backup/
 eval/run_ablation_checkpoint.json
+eval/run_ablation_checkpoint_v2.json
+eval/results_v2.csv
+eval/retrieval_eval_results.csv
+eval/generation_eval_results.csv
