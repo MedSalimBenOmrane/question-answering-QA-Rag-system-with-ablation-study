@@ -44,6 +44,12 @@ _requires_claude = pytest.mark.skipif(
     not _HAS_ANTHROPIC_KEY, reason="ANTHROPIC_API_KEY non configuree : juge Claude indisponible"
 )
 
+_HAS_BEDROCK_TOKEN = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK"))
+_requires_bedrock = pytest.mark.skipif(
+    not _HAS_BEDROCK_TOKEN,
+    reason="AWS_BEARER_TOKEN_BEDROCK non configuree : juge Bedrock indisponible",
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SYSTEM_PROMPT = (_REPO_ROOT / "src" / "prompts" / "system.txt").read_text(encoding="utf-8")
 
@@ -256,6 +262,78 @@ class TestJudgeAnswerRealClaude:
 
         assert set(scores.keys()) == {"q1"}
         assert isinstance(scores["q1"], JudgeScore)
+
+
+class TestLoadJudgeLLMProviderSelection:
+    """Selection du fournisseur (LLM_PROVIDER) : logique pure, aucun appel reseau."""
+
+    def test_unknown_provider_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "does-not-exist")
+
+        with pytest.raises(RuntimeError, match="LLM_PROVIDER"):
+            load_judge_llm()
+
+    def test_bedrock_missing_bearer_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Valeur vide plutot que delenv : load_judge_llm() appelle load_dotenv()
+        # (override=False par defaut), qui rechargerait la vraie valeur depuis
+        # .env si la variable etait totalement absente de os.environ.
+        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+
+        with pytest.raises(RuntimeError, match="AWS_BEARER_TOKEN_BEDROCK"):
+            load_judge_llm()
+
+    def test_bedrock_missing_region_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "dummy-token-for-presence-check-only")
+        monkeypatch.setenv("AWS_REGION", "")
+
+        with pytest.raises(RuntimeError, match="AWS_REGION"):
+            load_judge_llm()
+
+    def test_bedrock_missing_model_id_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "dummy-token-for-presence-check-only")
+        monkeypatch.setenv("AWS_REGION", "eu-west-3")
+        monkeypatch.setenv("BEDROCK_JUDGE_MODEL_ID", "")
+
+        with pytest.raises(RuntimeError, match="BEDROCK_JUDGE_MODEL_ID"):
+            load_judge_llm()
+
+    def test_anthropic_missing_api_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+        with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            load_judge_llm()
+
+
+@_requires_bedrock
+class TestJudgeAnswerRealBedrock:
+    """Appel reel a Amazon Bedrock (juge), un seul test : cout reel par execution.
+
+    Suppose LLM_PROVIDER=bedrock (ou le force via monkeypatch) et
+    AWS_BEARER_TOKEN_BEDROCK/AWS_REGION/BEDROCK_JUDGE_MODEL_ID deja
+    configures dans l'environnement/.env de qui l'execute.
+    """
+
+    def test_judge_scores_a_faithful_grounded_answer_highly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+        judge_llm = load_judge_llm()
+
+        score = judge_answer(
+            judge_llm,
+            question="What fuel does the propulsion system use?",
+            context="The propulsion system uses xenon as fuel for the ion thrusters.",
+            answer="The propulsion system uses xenon as fuel.",
+        )
+
+        assert isinstance(score, JudgeScore)
+        assert 0.0 <= score.faithfulness <= 1.0
+        assert 0.0 <= score.relevancy <= 1.0
+        assert score.faithfulness > 0.5
 
 
 @_requires_claude

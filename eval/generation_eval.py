@@ -2,13 +2,22 @@
 relevancy) + integration RAGAS (faithfulness, answer_relevancy, context_precision,
 context_recall).
 
-Le systeme RAG reste 100% LOCAL (Ollama) : SEUL le juge utilise l'API Claude.
-Le petit modele local (1.7-2B) teste comme generateur n'est JAMAIS utilise
-comme juge.
+Le systeme RAG reste 100% LOCAL (Ollama) : SEUL le juge utilise une API Claude
+distante (jamais le petit modele local 1.7-2B teste comme generateur).
 
-Le juge est Claude via langchain-anthropic (`ChatAnthropic`), modele
-configurable via la variable d'environnement ANTHROPIC_JUDGE_MODEL (.env,
-jamais committee), cle lue depuis ANTHROPIC_API_KEY.
+Le fournisseur du juge est choisi par la variable d'environnement
+LLM_PROVIDER (.env, jamais committee) :
+- "anthropic" (defaut, retro-compatible) : API Anthropic directe via
+  langchain-anthropic (`ChatAnthropic`), modele configurable via
+  ANTHROPIC_JUDGE_MODEL, cle lue depuis ANTHROPIC_API_KEY.
+- "bedrock" : Amazon Bedrock (API Converse) via langchain-aws
+  (`ChatBedrockConverse`), modele lu depuis BEDROCK_JUDGE_MODEL_ID, region
+  depuis AWS_REGION. Authentification par jeton porteur
+  (AWS_BEARER_TOKEN_BEDROCK) : ce code ne lit QUE sa presence, jamais sa
+  valeur - botocore le detecte lui-meme dans l'environnement du processus
+  (cf. `_load_bedrock_judge_llm`), qui n'est donc jamais logue ni transmis
+  explicitement en Python.
+Voir `load_judge_llm` pour le detail de la selection.
 
 Note empirique (verifiee en direct) : claude-sonnet-5 et claude-opus-5
 rejettent le parametre `temperature` que RAGAS envoie en interne pour
@@ -46,8 +55,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_GOLD_PATH = _REPO_ROOT / "eval" / "gold_retrieval.yaml"
 _DEFAULT_RESULTS_CSV_PATH = _REPO_ROOT / "eval" / "generation_eval_results.csv"
 
+_JUDGE_PROVIDER_ENV_VAR = "LLM_PROVIDER"
+
 _JUDGE_API_KEY_ENV_VAR = "ANTHROPIC_API_KEY"
 _JUDGE_MODEL_ENV_VAR = "ANTHROPIC_JUDGE_MODEL"
+
+_BEDROCK_BEARER_TOKEN_ENV_VAR = "AWS_BEARER_TOKEN_BEDROCK"
+_BEDROCK_REGION_ENV_VAR = "AWS_REGION"
+_BEDROCK_MODEL_ID_ENV_VAR = "BEDROCK_JUDGE_MODEL_ID"
 
 # Questions hors-corpus : le pipeline doit s'abstenir sur chacune d'elles.
 NEGATIVE_QUESTIONS = [
@@ -184,13 +199,41 @@ def run_pipeline_on_cases(pipeline: Any, cases: list[GenerationCase]) -> list[Ge
 
 
 def load_judge_llm() -> Any:
-    """Charge le LLM juge Claude (langchain-anthropic), jamais le generateur local.
+    """Charge le LLM juge (jamais le generateur RAG local), Anthropic ou Bedrock.
 
-    Lit `ANTHROPIC_API_KEY` et `ANTHROPIC_JUDGE_MODEL` depuis l'environnement
-    (charge `.env` si present).
+    Le fournisseur est choisi par `LLM_PROVIDER` (.env, charge automatiquement
+    ici) : "anthropic" (defaut, retro-compatible) ou "bedrock". Dans les deux
+    cas, le resultat est un objet LangChain `BaseChatModel` compatible avec
+    `judge_answer()` (appel direct `.invoke(prompt)`) et avec
+    `ragas.llms.LangchainLLMWrapper` (cf. `load_ragas_judge_and_embeddings`).
 
     Returns:
-        Une instance `ChatAnthropic` configuree.
+        Une instance `ChatAnthropic` ou `ChatBedrockConverse` configuree.
+
+    Raises:
+        RuntimeError: Si `LLM_PROVIDER` est inconnu, ou si une variable
+            d'environnement requise par le fournisseur choisi est absente.
+    """
+    import os
+
+    load_dotenv()
+
+    provider = os.environ.get(_JUDGE_PROVIDER_ENV_VAR, "anthropic").strip().lower()
+
+    if provider == "anthropic":
+        return _load_anthropic_judge_llm()
+    if provider == "bedrock":
+        return _load_bedrock_judge_llm()
+    raise RuntimeError(
+        f"{_JUDGE_PROVIDER_ENV_VAR} inconnu : {provider!r} "
+        "(attendu 'anthropic' ou 'bedrock')"
+    )
+
+
+def _load_anthropic_judge_llm() -> Any:
+    """Charge le juge via l'API Anthropic directe (langchain-anthropic).
+
+    Lit `ANTHROPIC_API_KEY` et `ANTHROPIC_JUDGE_MODEL` depuis l'environnement.
 
     Raises:
         RuntimeError: Si `ANTHROPIC_API_KEY` est absente de l'environnement.
@@ -199,17 +242,54 @@ def load_judge_llm() -> Any:
 
     from langchain_anthropic import ChatAnthropic
 
-    load_dotenv()
-
     api_key = os.environ.get(_JUDGE_API_KEY_ENV_VAR)
     if not api_key:
         raise RuntimeError(
             f"{_JUDGE_API_KEY_ENV_VAR} absente de l'environnement (.env) : "
-            "requise pour le juge Claude, jamais le petit modele local."
+            "requise pour le juge Claude (LLM_PROVIDER=anthropic)."
         )
     model = os.environ.get(_JUDGE_MODEL_ENV_VAR, "claude-haiku-4-5-20251001")
 
     return ChatAnthropic(model=model, api_key=api_key)
+
+
+def _load_bedrock_judge_llm() -> Any:
+    """Charge le juge via Amazon Bedrock (langchain-aws, API Converse).
+
+    Lit `AWS_REGION` et `BEDROCK_JUDGE_MODEL_ID` depuis l'environnement et
+    verifie la PRESENCE (jamais la valeur) de `AWS_BEARER_TOKEN_BEDROCK` :
+    ce jeton n'est jamais lu ni transmis explicitement par ce code - botocore
+    (>=1.35) le detecte lui-meme automatiquement dans l'environnement du
+    processus pour authentifier les appels Bedrock, ce qui evite de jamais
+    faire transiter sa valeur par une variable ou un log applicatif.
+
+    Raises:
+        RuntimeError: Si `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION` ou
+            `BEDROCK_JUDGE_MODEL_ID` sont absentes de l'environnement.
+    """
+    import os
+
+    from langchain_aws import ChatBedrockConverse
+
+    if not os.environ.get(_BEDROCK_BEARER_TOKEN_ENV_VAR):
+        raise RuntimeError(
+            f"{_BEDROCK_BEARER_TOKEN_ENV_VAR} absente de l'environnement (.env) : "
+            "requise pour le juge Bedrock (LLM_PROVIDER=bedrock)."
+        )
+    region = os.environ.get(_BEDROCK_REGION_ENV_VAR)
+    if not region:
+        raise RuntimeError(
+            f"{_BEDROCK_REGION_ENV_VAR} absente de l'environnement (.env) : "
+            "requise pour le juge Bedrock (LLM_PROVIDER=bedrock)."
+        )
+    model_id = os.environ.get(_BEDROCK_MODEL_ID_ENV_VAR)
+    if not model_id:
+        raise RuntimeError(
+            f"{_BEDROCK_MODEL_ID_ENV_VAR} absente de l'environnement (.env) : "
+            "requise pour le juge Bedrock (LLM_PROVIDER=bedrock)."
+        )
+
+    return ChatBedrockConverse(model_id=model_id, region_name=region)
 
 
 def _parse_judge_json(raw_text: str) -> dict[str, Any]:
