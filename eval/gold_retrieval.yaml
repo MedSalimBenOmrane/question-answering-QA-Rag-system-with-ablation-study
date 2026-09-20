@@ -7,9 +7,10 @@
     - changelog_v4.md
   key_points:
     - "If the QRC fails, the boot halts at phase 3 (AI Layer)."
-    - "Recovery follows the emergency procedure: activate SafeBoot via the Maintenance Shell, run init_ai_safe.py, inspect the QRC with 'qrc_diag --trace'."
-    - "If diagnostics fail: disable AI Layer autoload completely and reboot with a minimal profile."
-    - "v4.2 fixed the QRC hang during SafeBoot, but SafeBoot may still fail intermittently on initial attempts: monitor QRC logs."
+    - "Recovery follows the emergency startup procedure: cut power to Zones 1 and 4, activate SafeBoot via the Maintenance Shell, run init_ai_safe.py, then inspect the QRC diagnostic output with 'qrc_diag --trace'."
+    - "If diagnostics fail, disable AI Layer autoload completely and reboot with a minimal profile."
+    - "In v4.1, SafeBoot skips the AI Layer, which caused errors in edge cases with mission-critical AI dependencies; this was fixed in v4.2."
+    - "v4.2 fixed the QRC startup hang during SafeBoot, but SafeBoot may still intermittently fail on initial attempts post-patch: monitor QRC logs for anomalies."
 
 - id: q2
   question: "Explain the ambiguity around the term 'Safe Mode' and how it might affect operator decisions."
@@ -19,9 +20,10 @@
     - safe_modes.md
     - network_policies.md
   key_points:
-    - "'Safe Mode' has multiple conflicting meanings depending on version/context: a diagnostic state freezing AI (firmware v3.x), Isolation Mode (cuts external communication), and a low-power state with network bridges active."
-    - "It differs from Isolation, even though it is sometimes used interchangeably in legacy docs."
-    - "Operator impact: risk of leaving the system in an unintended state; operators must confirm the system version and exact meaning before executing Safe Mode commands."
+    - "'Safe Mode' has multiple conflicting meanings depending on firmware version and context: a diagnostic state freezing AI decision-making while keeping limited sensor input (firmware v3.x), Isolation Mode which cuts all external communication (operational manuals/legacy docs), and a low-power state with network bridges still active (some technician notes)."
+    - "The safe_modes.md documentation lists SafeBoot, LowPower, Isolation, and the deprecated Passive Mode as distinct states, and explicitly notes that the v3.x 'Safe Mode' differs from Isolation even though the terms are sometimes used interchangeably in legacy docs."
+    - "The practical impact of the ambiguity shows up in network behavior: in Safe Mode, external network bridges may remain active or be shut down depending on firmware version."
+    - "Operators must confirm the system version and the exact meaning of 'Safe Mode' before executing any Safe Mode command, because the ambiguity has already caused incidents where the system was left in an unintended state."
 
 - id: q3
   question: "What contradictions exist in network policies regarding AI outbound communication?"
@@ -29,10 +31,9 @@
   relevant_sources:
     - network_policies.md
   key_points:
-    - "AI modules must not initiate outbound connections without Commander override."
-    - "Contradiction: some docs say Isolation disables all outbound traffic, while others note internal telemetry uplinks are exempt/allowed."
-    - "v3.x firmware mistakenly allowed redundant outbound packets (leaks), fixed by Patch 7-F."
-    - "Emergency overrides can bypass all network restrictions (Commander or AI Ethics Officer only)."
+    - "The policy explicitly states a contradiction: some documentation says Isolation Mode disables all outbound traffic, while other documentation notes that internal telemetry uplinks are exempt from this restriction."
+    - "General policy requires a Commander override before AI modules can initiate any outbound connection, yet internal telemetry uplinks are separately stated to be allowed without that override."
+    - "Firmware v3.x mistakenly allowed redundant outbound packets, causing leaks, inconsistent with the no-outbound-without-override policy; this was fixed by Patch 7-F."
 
 - id: q4
   question: "Describe the procedure to manually restore communications modules if Isolation Mode was triggered."
@@ -40,9 +41,10 @@
   relevant_sources:
     - long_procedures.md
   key_points:
-    - "Emergency procedure, step 7: manually restore communications modules if Isolation Mode was triggered."
+    - "Step 7 of the Emergency Startup Procedure: manually restore communications modules if Isolation Mode was triggered."
+    - "This comes after step 6 (escalating privileges to Commander level to verify override routes) and before step 8."
     - "Step 8: re-enable the AI Layer only after a successful network sync."
-    - "The document only provides this high-level step: do not invent sub-steps."
+    - "The document only provides this high-level step: no sub-steps or specific commands are given for the restoration itself, do not invent any."
 
 - id: q5
   question: "Who is authorized to override network restrictions, and what conflicts might arise?"
@@ -51,6 +53,7 @@
     - network_policies.md
     - staff_bios.md
   key_points:
-    - "Authorized: the Commander (Cmdr. Zhi Morales) and the AI Ethics Officer (Dr. Laren Doss) can bypass restrictions via emergency overrides; the AI needs a Commander override for outbound connections."
-    - "Conflict: Morales frequently overrides AI routines (favoring efficiency over protocol), causing QRC conflicts."
-    - "Doss advocates strict limits on AI autonomy: the two authorized roles hold opposing philosophies."
+    - "Emergency overrides that bypass all network restrictions can only be performed by the Station Commander or the AI Ethics Officer; the AI itself needs a Commander override for any outbound connection."
+    - "The Station Commander is Cmdr. Zhi Morales, who favors operational efficiency over strict protocol adherence and occasionally overrides AI routines, sometimes causing QRC conflicts."
+    - "The AI Ethics Officer is Dr. Laren Doss, who advocates strict limits on AI autonomy in network operations."
+    - "Conflict: the two people authorized to override network restrictions hold opposing philosophies - efficiency-driven overrides (Morales) versus strict autonomy limits (Doss)."
