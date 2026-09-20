@@ -12,11 +12,13 @@ wheels/
 # Index vectoriel persistant (Chroma) et cache HF
 data/chroma/
 data/ablation/
+data/chunks.json
 .cache/
 
 # Secrets et logs
 .env
 *.log
+data/feedback.jsonl
 
 # Sauvegarde des fichiers originaux avant nettoyage (data_cleaning/clean_corpus.py)
 data_cleaning/originals_backup/
