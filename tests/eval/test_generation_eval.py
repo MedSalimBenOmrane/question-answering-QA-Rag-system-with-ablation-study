@@ -81,7 +81,11 @@ def _build_fast_pipeline() -> Pipeline:
         retriever=BM25Retriever(chunks=_CORPUS, k1=1.5, b=0.75),
         reranker=NoOpReranker(),
         selector=TopKSelector(),
-        llm=create_llm({"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt=_SYSTEM_PROMPT),
+        llm=create_llm(
+            {"model": "qwen3:1.7b", "temperature": 0.1},
+            system_prompt=_SYSTEM_PROMPT,
+            max_output_tokens=200,
+        ),
         guardrail_output=BasicGuardrail(max_length=4000),
         token_counter=token_counter,
         assemble_prompt=build_prompt,

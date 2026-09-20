@@ -46,7 +46,11 @@ def build_pipeline(config: dict[str, Any], chunks: list[Chunk], system_prompt: s
     retriever = create_retriever(config["retrieval"], embedder, vectorstore, chunks)
     reranker = create_reranker(config["reranking"])
     selector = create_selector(config["selection"])
-    llm = create_llm(config["llm"], system_prompt=system_prompt)
+    llm = create_llm(
+        config["llm"],
+        system_prompt=system_prompt,
+        max_output_tokens=config["budget"]["reserve_answer"],
+    )
     guardrail_input = create_guardrail(config["guardrails"]["input"])
     guardrail_output = create_guardrail(config["guardrails"]["output"])
 

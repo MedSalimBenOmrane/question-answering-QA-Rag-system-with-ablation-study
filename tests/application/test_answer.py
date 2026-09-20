@@ -53,7 +53,9 @@ class TestAnswerQuestion:
             reranker=NoOpReranker(),
             selector=TopKSelector(),
             llm=create_llm(
-                {"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt=_SYSTEM_PROMPT
+                {"model": "qwen3:1.7b", "temperature": 0.1},
+                system_prompt=_SYSTEM_PROMPT,
+                max_output_tokens=200,
             ),
             guardrail_output=BasicGuardrail(max_length=4000),
             token_counter=token_counter,

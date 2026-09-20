@@ -118,29 +118,51 @@ class TestSystemPrompt:
 class TestCreateLLM:
     def test_reads_model_and_temperature_from_config(self) -> None:
         llm = create_llm(
-            {"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt="system prompt text"
+            {"model": "qwen3:1.7b", "temperature": 0.1},
+            system_prompt="system prompt text",
+            max_output_tokens=200,
         )
 
         assert isinstance(llm, OllamaLLM)
         assert llm._model == "qwen3:1.7b"
         assert llm._temperature == 0.1
         assert llm._system_prompt == "system prompt text"
+        assert llm._max_output_tokens == 200
         assert isinstance(llm._client, ollama.Client)
 
     def test_reads_default_config_model_and_temperature(self) -> None:
         config = yaml.safe_load(_DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-        llm = create_llm(config["llm"], system_prompt="x")
+        llm = create_llm(config["llm"], system_prompt="x", max_output_tokens=200)
 
         assert llm._model == "qwen3:1.7b"
         assert llm._temperature == 0.1
 
     def test_missing_model_raises(self) -> None:
         with pytest.raises(KeyError):
-            create_llm({"temperature": 0.1}, system_prompt="x")
+            create_llm({"temperature": 0.1}, system_prompt="x", max_output_tokens=200)
 
     def test_missing_temperature_raises(self) -> None:
         with pytest.raises(KeyError):
-            create_llm({"model": "qwen3:1.7b"}, system_prompt="x")
+            create_llm({"model": "qwen3:1.7b"}, system_prompt="x", max_output_tokens=200)
+
+    def test_generation_never_exceeds_max_output_tokens(self) -> None:
+        """Le plafond `num_predict` est reellement applique par Ollama (pas
+        seulement stocke) : regression du bug reel ou une reponse depassait
+        le budget total de 1024 tokens (CLAUDE.md) faute de plafond de
+        generation, malgre un `context_budget` d'entree pourtant respecte."""
+        llm = create_llm(
+            {"model": "qwen3:1.7b", "temperature": 0.1},
+            system_prompt=(
+                "You are a verbose assistant. Always answer with as much detail "
+                "and as many words as possible, never stop early."
+            ),
+            max_output_tokens=15,
+        )
+        counter = TiktokenTokenCounter(tiktoken.get_encoding("cl100k_base"))
+
+        answer = llm.generate("Describe the history of space exploration in detail.")
+
+        assert counter.count(answer) <= 20  # petite marge : tokenizers differents (HF vs Ollama)
 
 
 class TestExperimentConfigsOnlyChangeModel:
@@ -173,7 +195,11 @@ class TestOllamaLLMRealGeneration:
 
     def _llm(self) -> OllamaLLM:
         system_prompt = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-        return create_llm({"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt=system_prompt)
+        return create_llm(
+            {"model": "qwen3:1.7b", "temperature": 0.1},
+            system_prompt=system_prompt,
+            max_output_tokens=200,
+        )
 
     def test_generate_answers_grounded_question_from_context(self) -> None:
         chunks = [

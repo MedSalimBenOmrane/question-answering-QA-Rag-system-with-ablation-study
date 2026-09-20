@@ -53,6 +53,7 @@ class OllamaLLM:
         model: str,
         temperature: float,
         system_prompt: str,
+        max_output_tokens: int,
     ) -> None:
         """Initialise l'adapter.
 
@@ -62,11 +63,19 @@ class OllamaLLM:
             temperature: Temperature d'echantillonnage du modele.
             system_prompt: Instructions systeme (grounding, abstention,
                 citations) - transmises separement du prompt utilisateur.
+            max_output_tokens: Plafond dur du nombre de tokens generes
+                (parametre natif Ollama `num_predict`). Correspond a
+                `budget.reserve_answer` : sans ce plafond, rien ne borne la
+                longueur reelle de la reponse generee, alors que le budget
+                de 1024 tokens (CLAUDE.md) est cense etre strict - bug reel
+                constate (reponse depassant le budget total malgre un
+                `context_budget` d'entree correctement respecte).
         """
         self._client = client
         self._model = model
         self._temperature = temperature
         self._system_prompt = system_prompt
+        self._max_output_tokens = max_output_tokens
 
     def generate(self, prompt: str) -> str:
         """Genere une reponse via Ollama.
@@ -76,18 +85,22 @@ class OllamaLLM:
                 produit par `build_prompt`.
 
         Returns:
-            Le texte genere par le modele.
+            Le texte genere par le modele, jamais plus de
+            `max_output_tokens` tokens (cf. `__init__`).
         """
         response = self._client.generate(
             model=self._model,
             prompt=prompt,
             system=self._system_prompt,
-            options={"temperature": self._temperature},
+            options={
+                "temperature": self._temperature,
+                "num_predict": self._max_output_tokens,
+            },
         )
         return response.response
 
 
-def create_llm(config: dict[str, Any], system_prompt: str) -> OllamaLLM:
+def create_llm(config: dict[str, Any], system_prompt: str, max_output_tokens: int) -> OllamaLLM:
     """Instancie l'adapter Ollama configure.
 
     Args:
@@ -96,6 +109,9 @@ def create_llm(config: dict[str, Any], system_prompt: str) -> OllamaLLM:
             http://localhost:11434).
         system_prompt: Contenu du system prompt (ex: lu depuis
             `src/prompts/system.txt` par l'appelant).
+        max_output_tokens: Plafond dur de tokens generes, transmis tel quel
+            a `OllamaLLM` (typiquement `config["budget"]["reserve_answer"]`,
+            lu par l'appelant : ce n'est pas une cle de la section `llm`).
 
     Returns:
         Un `OllamaLLM` pret a l'emploi.
@@ -113,5 +129,9 @@ def create_llm(config: dict[str, Any], system_prompt: str) -> OllamaLLM:
 
     client = ollama.Client(host=config.get("base_url"))
     return OllamaLLM(
-        client=client, model=model, temperature=temperature, system_prompt=system_prompt
+        client=client,
+        model=model,
+        temperature=temperature,
+        system_prompt=system_prompt,
+        max_output_tokens=max_output_tokens,
     )

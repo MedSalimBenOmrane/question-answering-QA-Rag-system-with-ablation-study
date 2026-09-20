@@ -51,7 +51,11 @@ def _build_pipeline(
 ) -> Pipeline:
     token_counter = TiktokenTokenCounter(tiktoken.get_encoding("cl100k_base"))
     retriever = BM25Retriever(chunks=_CORPUS, k1=1.5, b=0.75)
-    llm = create_llm({"model": "qwen3:1.7b", "temperature": 0.1}, system_prompt=_SYSTEM_PROMPT)
+    llm = create_llm(
+        {"model": "qwen3:1.7b", "temperature": 0.1},
+        system_prompt=_SYSTEM_PROMPT,
+        max_output_tokens=reserve_answer,
+    )
 
     return Pipeline(
         guardrail_input=BasicGuardrail(max_length=guardrail_input_max_length),
