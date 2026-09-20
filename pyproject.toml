@@ -20,6 +20,7 @@ dependencies = [
     "sentence-transformers>=6.1.0",
     "streamlit>=1.64.0",
     "tiktoken>=0.14.0",
+    "torchvision>=0.29.0",
     "transformers>=5.17.0",
 ]
 
