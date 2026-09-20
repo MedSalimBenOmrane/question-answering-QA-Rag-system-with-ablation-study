@@ -87,11 +87,22 @@ class OllamaLLM:
         Returns:
             Le texte genere par le modele, jamais plus de
             `max_output_tokens` tokens (cf. `__init__`).
+
+        Note (correction d'un bug reel) : `think=False` desactive le mode
+        raisonnement des modeles hybrides (ex: qwen3, qui emet par defaut un
+        bloc de reflexion interne separe avant la reponse). `num_predict`
+        plafonne le nombre TOTAL de tokens generes par Ollama, reflexion
+        incluse : sans `think=False`, un contexte volumineux pouvait epuiser
+        tout `max_output_tokens` dans la reflexion interne et ne jamais
+        produire de reponse (`response.response` vide, constate en direct).
+        Ollama ignore silencieusement ce parametre pour un modele qui ne
+        supporte pas le raisonnement (ex: smollm2).
         """
         response = self._client.generate(
             model=self._model,
             prompt=prompt,
             system=self._system_prompt,
+            think=False,
             options={
                 "temperature": self._temperature,
                 "num_predict": self._max_output_tokens,
