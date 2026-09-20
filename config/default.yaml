@@ -6,8 +6,12 @@ budget:
   reserve_answer: 200 # tokens reserves a la generation de la reponse
 
 pipeline:
-  retrieve_k: 10 # nombre de chunks recuperes par le Retriever
-  rerank_top_n: 5 # nombre de chunks conserves apres reranking
+  retrieve_k: 10 # nombre de chunks recuperes par le Retriever = taille totale du corpus (10 docs, 1 chunk/doc) : rien n'est perdu a ce stade
+  rerank_top_n: 10 # = retrieve_k : le reranking reordonne sans rien ecarter, c'est au Selector (budget-aware) de decider quoi garder.
+  # Avant (5) : coupait la moitie du corpus AVANT le Selector, ce qui perdait
+  # des chunks pertinents mais lexicalement/semantiquement eloignes de la
+  # question sur des questions multi-documents (ex: staff_bios.md pour une
+  # question sur les restrictions reseau) independamment du budget restant.
 
 guardrails:
   input:
