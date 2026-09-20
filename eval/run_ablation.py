@@ -32,8 +32,9 @@ Usage:
 
 import copy
 import csv
+import json
 import random
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,22 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _EXPERIMENTS_DIR = _REPO_ROOT / "config" / "experiments"
 _ABLATION_DATA_DIR = _REPO_ROOT / "data" / "ablation"
 _DEFAULT_RESULTS_CSV_PATH = _REPO_ROOT / "eval" / "run_ablation_results.csv"
+_CHECKPOINT_PATH = _REPO_ROOT / "eval" / "run_ablation_checkpoint.json"
+
+
+def _load_checkpoint(path: Path = _CHECKPOINT_PATH) -> dict[str, "ExperimentResult"]:
+    """Recharge les experiences deja terminees (relance sans les refaire)."""
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return {name: ExperimentResult(**item) for name, item in data.items()}
+
+
+def _save_checkpoint(checkpoint: dict[str, "ExperimentResult"], path: Path = _CHECKPOINT_PATH) -> None:
+    """Sauvegarde apres CHAQUE experience (relance = reprise, pas redemarrage)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {name: asdict(r) for name, r in checkpoint.items()}
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 _REINDEX_SECTIONS = {"chunking", "embedding"}
 
@@ -326,23 +343,29 @@ def main() -> None:
     for path in discover_experiment_configs():
         experiments.append((path.stem, load_experiment_override(path)))
 
-    results = []
-    for name, override in experiments:
-        print(f"--- {name} ({', '.join(changed_keys(override)) or 'baseline'}) ---")
-        results.append(
-            run_experiment(
-                name=name,
-                override=override,
-                base_config=base_config,
-                gold_retrieval_items=gold_retrieval_items,
-                gold_generation_cases=gold_generation_cases,
-                system_prompt=system_prompt,
-                judge_llm_raw=judge_llm_raw,
-                ragas_llm=ragas_llm,
-                ragas_embeddings=ragas_embeddings,
-            )
-        )
+    checkpoint = _load_checkpoint()
+    if checkpoint:
+        print(f"Checkpoint trouve : {len(checkpoint)} experience(s) deja faite(s), reprise.")
 
+    for name, override in experiments:
+        if name in checkpoint:
+            print(f"--- {name} : deja fait (checkpoint), ignore ---")
+            continue
+        print(f"--- {name} ({', '.join(changed_keys(override)) or 'baseline'}) ---")
+        checkpoint[name] = run_experiment(
+            name=name,
+            override=override,
+            base_config=base_config,
+            gold_retrieval_items=gold_retrieval_items,
+            gold_generation_cases=gold_generation_cases,
+            system_prompt=system_prompt,
+            judge_llm_raw=judge_llm_raw,
+            ragas_llm=ragas_llm,
+            ragas_embeddings=ragas_embeddings,
+        )
+        _save_checkpoint(checkpoint)  # sauvegarde immediate : jamais a refaire
+
+    results = [checkpoint[name] for name, _ in experiments]
     print("\n" + to_markdown_table(results))
 
     write_csv(results, _DEFAULT_RESULTS_CSV_PATH)

@@ -1,6 +1,11 @@
 # Override de default.yaml pour l'ablation (eval/run_ablation.py) : variable
 # etudiee = le MODE de retrieval (une seule dimension). Necessite 2 cles
 # (strategy vaut "dense" dans default.yaml) pour isoler le mode bm25 seul.
+# selection doit aussi passer a "knapsack" : BM25 ne produit jamais
+# d'embeddings, incompatible avec knapsack_mmr (defaut) qui en a besoin -
+# combinaison necessaire pour que ce mode de retrieval soit testable du tout.
 retrieval:
   hybrid: false
   strategy: bm25
+selection:
+  strategy: knapsack
