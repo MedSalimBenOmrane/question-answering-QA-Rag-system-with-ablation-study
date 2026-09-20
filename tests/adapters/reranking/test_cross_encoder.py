@@ -74,3 +74,18 @@ class TestCrossEncoderReranker:
     def test_empty_chunks_returns_empty(self, cross_encoder_model: CrossEncoder) -> None:
         reranker = CrossEncoderReranker(model=cross_encoder_model)
         assert reranker.rerank(_QUERY, [], top_n=5) == []
+
+    def test_scores_are_normalized_between_zero_and_one(
+        self, cross_encoder_model: CrossEncoder
+    ) -> None:
+        """Le score brut du cross-encoder n'est pas borne (logit) ; une fois
+        normalise, KnapsackMMRSelector peut evaluer un score effectif sans
+        rejeter a tort un chunk pertinent (bug reel constate en production)."""
+        reranker = CrossEncoderReranker(model=cross_encoder_model)
+        # requete hors-sujet : le cross-encoder doit donner un score brut tres
+        # negatif pour ces chunks, ce qui aurait pu produire un score final < 0
+        # avant la normalisation.
+        off_topic_query = "What is the capital of France?"
+        reranked = reranker.rerank(off_topic_query, _RAW_ORDER, top_n=3)
+        for sc in reranked:
+            assert 0.0 <= sc.score <= 1.0

@@ -4,11 +4,31 @@ Contrairement a un Embedder (qui encode requete et document separement puis
 compare des vecteurs), un cross-encoder encode la paire (requete, document)
 ensemble : plus couteux, mais plus precis pour reordonner un petit nombre de
 candidats deja retrouves par le retrieval.
+
+Le score brut d'un cross-encoder n'est PAS borne (logit) : peut etre tres
+negatif pour une paire peu pertinente. Or `KnapsackMMRSelector` (domain/
+budget.py) rejette tout chunk dont le score effectif
+(mmr_lambda * score - ...) est negatif, en supposant implicitement un score
+deja normalise entre 0 et 1. Sans normalisation ici, un cross-encoder au
+score negatif fait rejeter des chunks pertinents independamment du budget
+restant (bug reel constate). D'ou la sigmoide appliquee avant de renvoyer
+le score.
 """
+
+import math
 
 from sentence_transformers import CrossEncoder
 
 from src.domain.models import ScoredChunk
+
+
+def _sigmoid(x: float) -> float:
+    """Sigmoide numeriquement stable (evite l'overflow de math.exp)."""
+    if x >= 0:
+        z = math.exp(-x)
+        return 1.0 / (1.0 + z)
+    z = math.exp(x)
+    return z / (1.0 + z)
 
 
 class CrossEncoderReranker:
@@ -33,7 +53,8 @@ class CrossEncoderReranker:
 
         Returns:
             La liste des `top_n` chunks les plus pertinents selon le
-            cross-encoder, avec son score (remplace le score du retrieval).
+            cross-encoder, avec un score normalise dans (0, 1) (sigmoide du
+            logit brut - preserve l'ordre, remplace le score du retrieval).
         """
         if not chunks or top_n <= 0:
             return []
@@ -43,6 +64,6 @@ class CrossEncoderReranker:
 
         reranked = sorted(zip(chunks, scores), key=lambda pair: pair[1], reverse=True)
         return [
-            ScoredChunk(chunk=scored.chunk, score=float(score))
+            ScoredChunk(chunk=scored.chunk, score=_sigmoid(float(score)))
             for scored, score in reranked[:top_n]
         ]
