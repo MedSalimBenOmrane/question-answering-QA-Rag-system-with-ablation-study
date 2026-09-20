@@ -119,7 +119,12 @@ class Pipeline:
 
         if context_budget <= 0:
             return self._abstain(
-                ABSTENTION_TEXT, stage="budget_exhausted", start=start, meta={"context_budget": context_budget}
+                ABSTENTION_TEXT,
+                stage="budget_exhausted",
+                start=start,
+                retrieved=retrieved,
+                reranked=reranked,
+                meta={"context_budget": context_budget},
             )
 
         selected = self._selector.select(question, reranked, context_budget)
@@ -129,6 +134,8 @@ class Pipeline:
                 ABSTENTION_TEXT,
                 stage="no_chunk_selected",
                 start=start,
+                retrieved=retrieved,
+                reranked=reranked,
                 meta={"context_budget": context_budget, "n_retrieved": len(retrieved)},
             )
 
@@ -141,6 +148,8 @@ class Pipeline:
                 reason,
                 stage="guardrail_output",
                 start=start,
+                retrieved=retrieved,
+                reranked=reranked,
                 selected=selected,
                 meta={"context_budget": context_budget},
             )
@@ -172,6 +181,12 @@ class Pipeline:
                 "latency_seconds": round(time.perf_counter() - start, 4),
                 "selected_chunk_texts": [chunk.text for chunk in selected],
                 "selected_chunk_ranks": [rerank_rank_of[chunk.id] for chunk in selected],
+                "retrieved_sources": [scored.chunk.source for scored in retrieved],
+                "reranked_sources": [
+                    scored.chunk.source
+                    for scored in sorted(reranked, key=lambda scored: scored.score, reverse=True)
+                ],
+                "selected_sources": [chunk.source for chunk in selected],
             },
         )
 
@@ -180,10 +195,21 @@ class Pipeline:
         text: str,
         stage: str,
         start: float,
+        retrieved: list[Any] | None = None,
+        reranked: list[Any] | None = None,
         selected: list[Chunk] | None = None,
         meta: dict[str, Any] | None = None,
     ) -> Answer:
-        """Construit une `Answer` d'abstention, quel que soit le point d'arret."""
+        """Construit une `Answer` d'abstention, quel que soit le point d'arret.
+
+        Args:
+            retrieved: Candidats du retriever au moment de l'abstention, s'il
+                a deja tourne (`list[ScoredChunk]`), sinon `None`.
+            reranked: Candidats reordonnes par le reranker, s'il a deja
+                tourne (`list[ScoredChunk]`), sinon `None`.
+        """
+        retrieved = retrieved or []
+        reranked = reranked or []
         selected = selected or []
         return Answer(
             text=text,
@@ -195,6 +221,9 @@ class Pipeline:
                 "stage": stage,
                 "latency_seconds": round(time.perf_counter() - start, 4),
                 "selected_chunk_texts": [chunk.text for chunk in selected],
+                "retrieved_sources": [scored.chunk.source for scored in retrieved],
+                "reranked_sources": [scored.chunk.source for scored in reranked],
+                "selected_sources": [chunk.source for chunk in selected],
                 **(meta or {}),
             },
         )

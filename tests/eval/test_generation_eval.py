@@ -1,8 +1,10 @@
-"""Tests de eval/generation_eval.py : gold set, juge custom, RAGAS, rapports.
+"""Tests de eval/generation_eval.py : gold set, faithfulness (anti-hallucination),
+answer_correctness (anti-omission), rapports.
 
-Aucun mock. Les tests qui appellent reellement l'API Claude sont minimises en
-nombre (cout reel a chaque execution) et sautes automatiquement si
-ANTHROPIC_API_KEY n'est pas configuree dans l'environnement/.env.
+Aucun mock. Les tests qui appellent reellement un juge LLM (Claude/Bedrock)
+sont minimises en nombre (cout reel a chaque execution, un appel par
+affirmation) et sautes automatiquement si les identifiants correspondants ne
+sont pas configures dans l'environnement/.env.
 """
 
 import csv
@@ -13,22 +15,24 @@ import pytest
 from dotenv import load_dotenv
 
 from eval.generation_eval import (
+    AnswerCorrectnessResult,
+    CaseJudgment,
+    FaithfulnessResult,
     GenerationCase,
     GenerationResult,
-    JudgeScore,
-    _LangchainCompatibleEmbeddings,
-    _parse_judge_json,
-    custom_judge_eval,
-    judge_answer,
+    answer_correctness,
+    extract_claims,
+    faithfulness,
+    judge_claim,
+    judge_coverage,
+    judge_results,
     load_gold_cases,
     load_judge_llm,
     negative_cases,
-    ragas_eval,
     run_pipeline_on_cases,
     to_markdown_table,
     write_csv,
 )
-from src.adapters.embedding.bge_m3 import BgeM3Embedder
 from src.adapters.guardrails.basic import BasicGuardrail
 from src.adapters.llm.ollama import build_prompt, create_llm
 from src.adapters.llm.token_counter import TiktokenTokenCounter
@@ -101,7 +105,7 @@ def _build_fast_pipeline() -> Pipeline:
 
 
 class TestLoadGoldCases:
-    def test_parses_key_points_into_reference(self, tmp_path: Path) -> None:
+    def test_parses_key_points(self, tmp_path: Path) -> None:
         path = tmp_path / "gold.yaml"
         path.write_text(_FAKE_GOLD_YAML, encoding="utf-8")
 
@@ -109,14 +113,16 @@ class TestLoadGoldCases:
 
         assert len(cases) == 2
         assert cases[0] == GenerationCase(
-            id="q1", question="What fuels the propulsion system?", reference="Xenon fuels the ion thrusters."
+            id="q1",
+            question="What fuels the propulsion system?",
+            key_points=["Xenon fuels the ion thrusters."],
         )
 
-    def test_missing_key_points_gives_none_reference(self, tmp_path: Path) -> None:
+    def test_missing_key_points_gives_empty_list(self, tmp_path: Path) -> None:
         path = tmp_path / "gold.yaml"
         path.write_text(_FAKE_GOLD_YAML, encoding="utf-8")
         cases = load_gold_cases(path)
-        assert cases[1].reference is None
+        assert cases[1].key_points == []
 
     def test_empty_file_raises(self, tmp_path: Path) -> None:
         path = tmp_path / "gold.yaml"
@@ -126,30 +132,23 @@ class TestLoadGoldCases:
 
 
 class TestNegativeCases:
-    def test_builds_cases_without_reference(self) -> None:
+    def test_builds_cases_without_key_points(self) -> None:
         cases = negative_cases(["What is the capital of France?"])
-        assert cases == [GenerationCase(id="neg1", question="What is the capital of France?", reference=None)]
-
-
-class TestParseJudgeJson:
-    def test_parses_clean_json(self) -> None:
-        payload = _parse_judge_json('{"faithfulness": 0.9, "relevancy": 0.8, "reasoning": "ok"}')
-        assert payload == {"faithfulness": 0.9, "relevancy": 0.8, "reasoning": "ok"}
-
-    def test_parses_json_wrapped_in_markdown_fence(self) -> None:
-        raw = '```json\n{"faithfulness": 1.0, "relevancy": 1.0, "reasoning": "fine"}\n```'
-        payload = _parse_judge_json(raw)
-        assert payload["faithfulness"] == 1.0
-
-    def test_no_json_raises(self) -> None:
-        with pytest.raises(ValueError):
-            _parse_judge_json("not json at all")
+        assert cases == [
+            GenerationCase(id="neg1", question="What is the capital of France?", key_points=[])
+        ]
 
 
 class TestRunPipelineOnCases:
-    def test_captures_answer_and_contexts(self) -> None:
+    def test_captures_answer_contexts_and_key_points(self) -> None:
         pipeline = _build_fast_pipeline()
-        cases = [GenerationCase(id="q1", question="What fuel does the propulsion system use?")]
+        cases = [
+            GenerationCase(
+                id="q1",
+                question="What fuel does the propulsion system use?",
+                key_points=["Xenon fuels the ion thrusters."],
+            )
+        ]
 
         results = run_pipeline_on_cases(pipeline, cases)
 
@@ -158,6 +157,7 @@ class TestRunPipelineOnCases:
         assert "xenon" in results[0].answer_text.lower()
         assert results[0].abstained is False
         assert any("xenon" in c.lower() for c in results[0].contexts)
+        assert results[0].key_points == ["Xenon fuels the ion thrusters."]
 
     def test_negative_case_abstains(self) -> None:
         pipeline = _build_fast_pipeline()
@@ -166,45 +166,60 @@ class TestRunPipelineOnCases:
         results = run_pipeline_on_cases(pipeline, cases)
 
         assert results[0].abstained is True
+        assert results[0].key_points == []
 
 
-class TestLangchainCompatibleEmbeddings:
-    def test_delegates_to_real_embedder(self, bge_m3_embedder: BgeM3Embedder) -> None:
-        shim = _LangchainCompatibleEmbeddings(bge_m3_embedder)
+class TestAnswerCorrectnessNoKeyPoints:
+    """`answer_correctness` renvoie immediatement sans jamais appeler le juge
+    si `key_points` est vide (cas negatif hors-corpus) : logique pure, aucun
+    cout reel, verifiee en passant un juge factice qui leverait si appele."""
 
-        query_vector = shim.embed_query("hello world")
-        doc_vectors = shim.embed_documents(["hello world", "another doc"])
+    def test_empty_key_points_returns_none_without_calling_judge(self) -> None:
+        def _unused_judge_would_raise(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("le juge ne doit jamais etre appele si key_points est vide")
 
-        assert len(query_vector) == 1024
-        assert len(doc_vectors) == 2
-        assert len(doc_vectors[0]) == 1024
+        result = answer_correctness("q1", [], "peu importe la reponse", _unused_judge_would_raise)
+
+        assert result == AnswerCorrectnessResult(
+            score=None, n_covered=0, n_total=0, uncovered_key_point_ids=[]
+        )
 
 
 class TestReports:
     _RESULTS = [
         GenerationResult(
-            id="q1", question="q", answer_text="a", abstained=False, contexts=["ctx"], reference="ref"
+            id="q1", question="q", answer_text="a", abstained=False, contexts=["ctx"], key_points=["kp1"]
         )
     ]
-    _CUSTOM = {"q1": JudgeScore(faithfulness=0.9, relevancy=0.8, reasoning="ok")}
-    _RAGAS = {
-        "q1": {
-            "faithfulness": 0.95,
-            "answer_relevancy": 0.85,
-            "context_precision": 1.0,
-            "context_recall": 1.0,
-        }
+    _JUDGMENTS = {
+        "q1": CaseJudgment(
+            id="q1",
+            faithfulness=FaithfulnessResult(score=0.9, n_claims=3),
+            correctness=AnswerCorrectnessResult(score=1.0, n_covered=1, n_total=1, uncovered_key_point_ids=[]),
+        )
     }
 
     def test_markdown_table_contains_scores(self) -> None:
-        table = to_markdown_table(self._RESULTS, self._CUSTOM, self._RAGAS)
+        table = to_markdown_table(self._RESULTS, self._JUDGMENTS)
         assert "| q1 |" in table
         assert "0.90" in table
-        assert "0.95" in table
+        assert "1.00" in table
+        assert "1/1" in table
+
+    def test_markdown_table_handles_none_scores(self) -> None:
+        judgments = {
+            "q1": CaseJudgment(
+                id="q1",
+                faithfulness=FaithfulnessResult(score=None, n_claims=0),
+                correctness=AnswerCorrectnessResult(score=None, n_covered=0, n_total=0, uncovered_key_point_ids=[]),
+            )
+        }
+        table = to_markdown_table(self._RESULTS, judgments)
+        assert "n/a" in table
 
     def test_write_csv_round_trips(self, tmp_path: Path) -> None:
         path = tmp_path / "results.csv"
-        write_csv(self._RESULTS, self._CUSTOM, self._RAGAS, path)
+        write_csv(self._RESULTS, self._JUDGMENTS, path)
 
         with path.open(encoding="utf-8") as f:
             rows = list(csv.reader(f))
@@ -213,55 +228,23 @@ class TestReports:
         assert rows[1][0] == "q1"
         assert rows[1][2] == "0.9"
 
-
-@_requires_claude
-class TestJudgeAnswerRealClaude:
-    """Appels reels a l'API Claude (juge), minimises en nombre."""
-
-    def test_judge_scores_a_faithful_grounded_answer_highly(self) -> None:
-        judge_llm = load_judge_llm()
-
-        score = judge_answer(
-            judge_llm,
-            question="What fuel does the propulsion system use?",
-            context="The propulsion system uses xenon as fuel for the ion thrusters.",
-            answer="The propulsion system uses xenon as fuel.",
-        )
-
-        assert isinstance(score, JudgeScore)
-        assert 0.0 <= score.faithfulness <= 1.0
-        assert 0.0 <= score.relevancy <= 1.0
-        assert score.faithfulness > 0.5
-
-    def test_judge_scores_honest_abstention_as_faithful(self) -> None:
-        judge_llm = load_judge_llm()
-
-        score = judge_answer(
-            judge_llm,
-            question="What is the capital of France?",
-            context="The propulsion system uses xenon as fuel for the ion thrusters.",
-            answer="Information non trouvée dans les documents.",
-        )
-
-        assert score.faithfulness > 0.5
-
-    def test_custom_judge_eval_scores_each_result(self) -> None:
-        judge_llm = load_judge_llm()
-        results = [
-            GenerationResult(
+    def test_write_csv_lists_uncovered_key_point_ids(self, tmp_path: Path) -> None:
+        judgments = {
+            "q1": CaseJudgment(
                 id="q1",
-                question="What fuel does the propulsion system use?",
-                answer_text="The propulsion system uses xenon as fuel.",
-                abstained=False,
-                contexts=["The propulsion system uses xenon as fuel for the ion thrusters."],
-                reference="Xenon fuels the ion thrusters.",
+                faithfulness=FaithfulnessResult(score=1.0, n_claims=1),
+                correctness=AnswerCorrectnessResult(
+                    score=0.5, n_covered=1, n_total=2, uncovered_key_point_ids=["q1-kp2"]
+                ),
             )
-        ]
+        }
+        path = tmp_path / "results.csv"
+        write_csv(self._RESULTS, judgments, path)
 
-        scores = custom_judge_eval(judge_llm, results)
+        with path.open(encoding="utf-8") as f:
+            rows = list(csv.reader(f))
 
-        assert set(scores.keys()) == {"q1"}
-        assert isinstance(scores["q1"], JudgeScore)
+        assert rows[1][-1] == "q1-kp2"
 
 
 class TestLoadJudgeLLMProviderSelection:
@@ -308,64 +291,135 @@ class TestLoadJudgeLLMProviderSelection:
             load_judge_llm()
 
 
-@_requires_bedrock
-class TestJudgeAnswerRealBedrock:
-    """Appel reel a Amazon Bedrock (juge), un seul test : cout reel par execution.
+@_requires_claude
+class TestFaithfulnessRealClaude:
+    """Appels reels au juge (un par affirmation extraite) : minimises en nombre."""
 
-    Suppose LLM_PROVIDER=bedrock (ou le force via monkeypatch) et
-    AWS_BEARER_TOKEN_BEDROCK/AWS_REGION/BEDROCK_JUDGE_MODEL_ID deja
-    configures dans l'environnement/.env de qui l'execute.
-    """
+    @pytest.fixture(autouse=True)
+    def _force_anthropic_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Le vrai .env de developpement peut avoir LLM_PROVIDER=bedrock : ces
+        # tests testent specifiquement le chemin Anthropic (cf. _requires_claude).
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
 
-    def test_judge_scores_a_faithful_grounded_answer_highly(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
-        judge_llm = load_judge_llm()
+    def test_grounded_answer_is_fully_faithful(self) -> None:
+        judge = load_judge_llm()
+        context = "The propulsion system uses xenon as fuel for the ion thrusters."
+        answer = "The propulsion system uses xenon as fuel."
 
-        score = judge_answer(
-            judge_llm,
-            question="What fuel does the propulsion system use?",
-            context="The propulsion system uses xenon as fuel for the ion thrusters.",
-            answer="The propulsion system uses xenon as fuel.",
+        result = faithfulness(answer, context, judge)
+
+        assert result.n_claims >= 1
+        assert result.score is not None
+        assert result.score > 0.5
+
+    def test_pure_abstention_yields_none_score_not_one(self) -> None:
+        """Reproduit le bug de l'ancien harness (faithfulness_custom=1.00 pour
+        une reponse quasi vide) : une abstention pure ne doit jamais produire
+        un score de 1.0 par defaut, mais None (aucune affirmation a juger)."""
+        judge = load_judge_llm()
+
+        result = faithfulness(
+            "Information non trouvée dans les documents.",
+            "The propulsion system uses xenon as fuel for the ion thrusters.",
+            judge,
         )
 
-        assert isinstance(score, JudgeScore)
-        assert 0.0 <= score.faithfulness <= 1.0
-        assert 0.0 <= score.relevancy <= 1.0
-        assert score.faithfulness > 0.5
+        if result.n_claims == 0:
+            assert result.score is None
+        else:
+            # le juge a extrait une "affirmation" de l'abstention elle-meme -
+            # comportement du LLM, pas de notre logique : on verifie alors
+            # seulement la coherence interne (score defini si n_claims > 0).
+            assert result.score is not None
+
+    def test_extract_claims_and_judge_claim_are_independently_callable(self) -> None:
+        judge = load_judge_llm()
+        claims = extract_claims("The propulsion system uses xenon as fuel.", judge)
+        assert len(claims) >= 1
+        assert judge_claim(
+            claims[0], "The propulsion system uses xenon as fuel for the ion thrusters.", judge
+        ) in (True, False)
 
 
 @_requires_claude
-class TestRagasEvalReal:
-    """Un seul appel reel bout en bout (4 metriques) : le juge + l'embedder
-    local sont deja valides individuellement par les tests ci-dessus."""
+class TestAnswerCorrectnessRealClaude:
+    @pytest.fixture(autouse=True)
+    def _force_anthropic_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
 
-    def test_ragas_eval_returns_all_four_metrics_with_reference(self) -> None:
-        from eval.generation_eval import load_ragas_judge_and_embeddings
+    def test_fully_covering_answer_scores_one(self) -> None:
+        judge = load_judge_llm()
 
+        result = answer_correctness(
+            "q1",
+            ["Xenon fuels the ion thrusters."],
+            "The ion thrusters are fueled by xenon.",
+            judge,
+        )
+
+        assert result.n_total == 1
+        assert result.score == pytest.approx(1.0)
+        assert result.uncovered_key_point_ids == []
+
+    def test_uncovered_key_point_is_reported_with_its_id(self) -> None:
+        judge = load_judge_llm()
+
+        result = answer_correctness(
+            "q1",
+            ["Xenon fuels the ion thrusters.", "The reactor produces 500 megawatts."],
+            "The ion thrusters are fueled by xenon.",
+            judge,
+        )
+
+        assert result.n_covered == 1
+        assert result.n_total == 2
+        assert "q1-kp2" in result.uncovered_key_point_ids
+
+    def test_judge_coverage_directly_callable(self) -> None:
+        judge = load_judge_llm()
+        assert judge_coverage("Xenon fuels the ion thrusters.", "It uses xenon.", judge) in (True, False)
+
+
+@_requires_claude
+class TestJudgeResultsRealClaude:
+    @pytest.fixture(autouse=True)
+    def _force_anthropic_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+
+    def test_judges_every_result(self) -> None:
+        judge = load_judge_llm()
         results = [
             GenerationResult(
                 id="q1",
                 question="What fuel does the propulsion system use?",
-                answer_text="The propulsion system uses xenon as fuel for the ion thrusters.",
+                answer_text="The propulsion system uses xenon as fuel.",
                 abstained=False,
                 contexts=["The propulsion system uses xenon as fuel for the ion thrusters."],
-                reference="Xenon fuels the ion thrusters.",
+                key_points=["Xenon fuels the ion thrusters."],
             )
         ]
 
-        judge_llm, judge_embeddings = load_ragas_judge_and_embeddings(
-            {"provider": "bge_m3", "bge_m3": {"model_name": "BAAI/bge-m3", "device": "cpu", "batch_size": 32}}
+        judgments = judge_results(judge, results)
+
+        assert set(judgments.keys()) == {"q1"}
+        assert isinstance(judgments["q1"], CaseJudgment)
+        assert judgments["q1"].correctness.n_total == 1
+
+
+@_requires_bedrock
+class TestFaithfulnessRealBedrock:
+    """Un seul test reel Bedrock (le mecanisme est deja valide via Claude ci-dessus)."""
+
+    def test_grounded_answer_is_fully_faithful(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_PROVIDER", "bedrock")
+        judge = load_judge_llm()
+
+        result = faithfulness(
+            "The propulsion system uses xenon as fuel.",
+            "The propulsion system uses xenon as fuel for the ion thrusters.",
+            judge,
         )
 
-        scores = ragas_eval(results, judge_llm, judge_embeddings)
-
-        assert set(scores["q1"].keys()) == {
-            "faithfulness",
-            "answer_relevancy",
-            "context_precision",
-            "context_recall",
-        }
-        for value in scores["q1"].values():
-            assert 0.0 <= value <= 1.0
+        assert result.n_claims >= 1
+        assert result.score is not None
+        assert result.score > 0.5

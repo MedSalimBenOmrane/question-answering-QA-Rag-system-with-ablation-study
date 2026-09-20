@@ -1,9 +1,21 @@
-"""Evalue la generation du pipeline RAG : juge LLM-as-judge custom (faithfulness,
-relevancy) + integration RAGAS (faithfulness, answer_relevancy, context_precision,
-context_recall).
+"""Evalue la generation du pipeline RAG via DEUX metriques orthogonales,
+calculees par un juge LLM local (Claude ou Bedrock, jamais le petit modele
+1.7-2B teste comme generateur), un appel PAR AFFIRMATION - jamais un appel
+global. Aucune dependance externe de scoring (pas de sacrebleu, rouge, nltk,
+bert-score, ragas) : chantier "relative_threshold", etape 3.2.
 
-Le systeme RAG reste 100% LOCAL (Ollama) : SEUL le juge utilise une API Claude
-distante (jamais le petit modele local 1.7-2B teste comme generateur).
+- `faithfulness` (anti-hallucination) : le modele invente-t-il ? Extraction
+  des affirmations atomiques de la reponse, puis verification de chacune
+  contre le CONTEXTE REELLEMENT FOURNI au generateur (jamais le gold, jamais
+  le corpus entier).
+- `answer_correctness` (anti-omission) : dit-il ce qu'il fallait dire ?
+  Couverture de chaque `key_point` du gold set (verite terrain IMMUTABLE,
+  jamais modifiee) par la reponse generee.
+
+Les deux sont necessaires ensemble : un modele peut saturer `faithfulness`
+en ne disant presque rien (`answer_correctness` l'en empeche) - mode de
+defaillance reel observe (`llm_smollm`, faithfulness_custom=1.00 avec
+relevancy=0.08 dans l'ancien harness).
 
 Le fournisseur du juge est choisi par la variable d'environnement
 LLM_PROVIDER (.env, jamais committee) :
@@ -14,35 +26,27 @@ LLM_PROVIDER (.env, jamais committee) :
   (`ChatBedrockConverse`), modele lu depuis BEDROCK_JUDGE_MODEL_ID, region
   depuis AWS_REGION. Authentification par jeton porteur
   (AWS_BEARER_TOKEN_BEDROCK) : ce code ne lit QUE sa presence, jamais sa
-  valeur - botocore le detecte lui-meme dans l'environnement du processus
-  (cf. `_load_bedrock_judge_llm`), qui n'est donc jamais logue ni transmis
-  explicitement en Python.
-Voir `load_judge_llm` pour le detail de la selection.
+  valeur - botocore le detecte lui-meme dans l'environnement du processus,
+  qui n'est donc jamais logue ni transmis explicitement en Python.
 
-Note empirique (verifiee en direct) : claude-sonnet-5 et claude-opus-5
-rejettent le parametre `temperature` que RAGAS envoie en interne pour
-plusieurs metriques (erreur API "temperature is deprecated for this model") ;
-claude-haiku-4-5-20251001 l'accepte normalement. C'est pourquoi
-ANTHROPIC_JUDGE_MODEL vaut claude-haiku-4-5-20251001 par defaut.
-
-RAGAS appelle OpenAI par defaut : on lui passe EXPLICITEMENT le LLM Claude
-(via `ragas.llms.LangchainLLMWrapper`) et un embedder LOCAL sentence-
-transformers (le meme BgeM3Embedder que le systeme RAG, cf. embedding.bge_m3
-en config), sinon il tenterait un appel OpenAI. Note technique (verifiee en
-direct) : la metrique `answer_relevancy` de RAGAS attend l'interface
-LangChain classique (`embed_query`/`embed_documents`), pas l'interface
-native `ragas.embeddings` (`embed_text`/`embed_texts`) : on enveloppe donc
-notre Embedder via un petit adaptateur avant de le passer a
-`ragas.embeddings.LangchainEmbeddingsWrapper`.
+Determinisme (chantier "relative_threshold", etape 4) : `temperature=0` sur
+les deux fournisseurs - le maximum de determinisme expose par leurs API
+respectives. `top_p` deliberement NON transmis en plus : verifie en direct,
+le modele Bedrock cible (Claude Sonnet 4.6 via Converse) rejette une requete
+specifiant temperature ET top_p simultanement ("cannot both be specified for
+this model") - erreur API reelle, pas une hypothese. `top_p` est de toute
+facon sans effet des lors que `temperature=0` force un decodage quasi-glouton.
+Limite verifiee et documentee : ni `ChatAnthropic` ni `ChatBedrockConverse`
+n'exposent de parametre `seed` (contrairement a certaines API type OpenAI) -
+la reproductibilite bit-a-bit du juge n'est donc PAS garantie meme a
+temperature=0, seulement rendue la plus stable possible.
 
 Usage:
     uv run python -m eval.generation_eval
 """
 
 import csv
-import json
-import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,28 +68,49 @@ _BEDROCK_BEARER_TOKEN_ENV_VAR = "AWS_BEARER_TOKEN_BEDROCK"
 _BEDROCK_REGION_ENV_VAR = "AWS_REGION"
 _BEDROCK_MODEL_ID_ENV_VAR = "BEDROCK_JUDGE_MODEL_ID"
 
+_JUDGE_TEMPERATURE = 0.0
+
 # Questions hors-corpus : le pipeline doit s'abstenir sur chacune d'elles.
+# Aucun key_point (rien a couvrir) : seule `faithfulness` s'applique.
 NEGATIVE_QUESTIONS = [
     "What is the capital of France?",
     "Who won the FIFA World Cup in 2022?",
 ]
 
-_JUDGE_PROMPT_TEMPLATE = """You are a strict evaluation judge for a RAG (Retrieval-Augmented Generation) system.
+_CLAIM_EXTRACTION_PROMPT = """Découpe la réponse ci-dessous en affirmations atomiques et vérifiables.
+Une affirmation = un seul fait. Ignore les formules de politesse, les
+transitions et les reformulations de la question.
 
-Given a QUESTION, the CONTEXT that was retrieved to answer it, and the ANSWER the system produced, score two things:
+RÉPONSE :
+{answer}
 
-1. "faithfulness" (0.0 to 1.0): does every factual claim in ANSWER come from CONTEXT, without hallucination or unsupported invention? An honest abstention ("Information non trouvee dans les documents.") is always fully faithful (1.0), since it invents nothing.
-2. "relevancy" (0.0 to 1.0): does ANSWER actually address QUESTION? An abstention is relevant (high score) ONLY if CONTEXT genuinely does not contain the answer; it is NOT relevant (low score) if CONTEXT did contain a usable answer but the system abstained anyway.
+Retourne une affirmation par ligne, sans numérotation, sans commentaire.
+Si la réponse ne contient aucune affirmation factuelle, ne retourne rien.
+"""
 
-Respond with ONLY a JSON object, no other text, no markdown code fences:
-{{"faithfulness": <float 0.0-1.0>, "relevancy": <float 0.0-1.0>, "reasoning": "<one short sentence>"}}
+_CLAIM_VERIFICATION_PROMPT = """Tu vérifies si une affirmation est appuyée par un contexte.
 
-QUESTION: {question}
-
-CONTEXT:
+CONTEXTE :
 {context}
 
-ANSWER: {answer}
+AFFIRMATION : {claim}
+
+L'affirmation est-elle directement déductible du contexte ci-dessus ?
+N'utilise aucune connaissance externe. Ne juge pas si l'affirmation est
+vraie dans l'absolu, seulement si le contexte l'appuie.
+Réponds par un seul mot : APPUYEE ou NON_APPUYEE
+"""
+
+_COVERAGE_PROMPT = """Tu vérifies si une affirmation est couverte par une réponse.
+
+AFFIRMATION : {key_point}
+RÉPONSE : {answer}
+
+L'affirmation est-elle exprimée dans la réponse, même reformulée ?
+Ignore le style, l'ordre et le vocabulaire. Ne juge que le contenu factuel.
+Une affirmation qui porte sur l'ABSENCE d'information n'est couverte que si
+la réponse signale explicitement cette absence.
+Réponds par un seul mot : COUVERT ou ABSENT
 """
 
 
@@ -96,14 +121,14 @@ class GenerationCase:
     Attributes:
         id: Identifiant court du cas.
         question: La question posee au pipeline.
-        reference: Reponse de reference (ex: key_points du gold set joints),
-            utilisee par RAGAS pour context_precision/context_recall. None
-            pour un cas negatif (aucune reponse de reference n'existe).
+        key_points: Affirmations de reference (verite terrain du gold set,
+            IMMUTABLE) que la reponse doit couvrir. Vide pour un cas negatif
+            (rien a couvrir hors-corpus).
     """
 
     id: str
     question: str
-    reference: str | None = None
+    key_points: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -115,25 +140,39 @@ class GenerationResult:
     answer_text: str
     abstained: bool
     contexts: list[str]
-    reference: str | None
+    key_points: list[str]
 
 
 @dataclass
-class JudgeScore:
-    """Score du juge LLM custom pour une reponse."""
+class FaithfulnessResult:
+    """Resultat de `faithfulness` : `score` est None (jamais 1.0) si la
+    reponse ne contient aucune affirmation extraite - une reponse vide ne
+    contredit jamais le contexte, ce n'est pas la meme chose qu'une reponse
+    parfaitement fidele."""
 
-    faithfulness: float
-    relevancy: float
-    reasoning: str
+    score: float | None
+    n_claims: int
+
+
+@dataclass
+class AnswerCorrectnessResult:
+    """Resultat de `answer_correctness` : `uncovered_key_point_ids` est le
+    signal le plus actionnable du harness (quelle information precise le
+    pipeline perd), a lister par question dans le rapport (etape 5)."""
+
+    score: float | None
+    n_covered: int
+    n_total: int
+    uncovered_key_point_ids: list[str]
 
 
 def load_gold_cases(path: Path = _DEFAULT_GOLD_PATH) -> list[GenerationCase]:
-    """Charge les questions positives du gold set (reference = key_points joints).
+    """Charge les questions positives du gold set (IMMUTABLE, lecture seule).
 
     Args:
         path: Chemin du fichier YAML du gold set (meme format que
             `eval/retrieval_eval.py` : id, question, relevant_sources,
-            key_points optionnels).
+            key_points).
 
     Returns:
         Les cas de generation positifs (un par question du gold set).
@@ -153,15 +192,14 @@ def load_gold_cases(path: Path = _DEFAULT_GOLD_PATH) -> list[GenerationCase]:
         except KeyError as exc:
             raise ValueError(f"item de gold set invalide (id/question requis) : {entry}") from exc
 
-        key_points = entry.get("key_points") or []
-        reference = " ".join(key_points) if key_points else None
-        cases.append(GenerationCase(id=case_id, question=question, reference=reference))
+        key_points = list(entry.get("key_points") or [])
+        cases.append(GenerationCase(id=case_id, question=question, key_points=key_points))
 
     return cases
 
 
 def negative_cases(questions: list[str] = NEGATIVE_QUESTIONS) -> list[GenerationCase]:
-    """Construit les cas negatifs (questions hors-corpus, aucune reference).
+    """Construit les cas negatifs (questions hors-corpus, aucun key_point).
 
     Args:
         questions: Les questions hors-corpus a tester.
@@ -169,7 +207,7 @@ def negative_cases(questions: list[str] = NEGATIVE_QUESTIONS) -> list[Generation
     Returns:
         Les cas de generation negatifs correspondants.
     """
-    return [GenerationCase(id=f"neg{i + 1}", question=q) for i, q in enumerate(questions)]
+    return [GenerationCase(id=f"neg{i + 1}", question=q, key_points=[]) for i, q in enumerate(questions)]
 
 
 def run_pipeline_on_cases(pipeline: Any, cases: list[GenerationCase]) -> list[GenerationResult]:
@@ -192,7 +230,7 @@ def run_pipeline_on_cases(pipeline: Any, cases: list[GenerationCase]) -> list[Ge
                 answer_text=answer.text,
                 abstained=answer.abstained,
                 contexts=answer.meta.get("selected_chunk_texts", []),
-                reference=case.reference,
+                key_points=case.key_points,
             )
         )
     return results
@@ -204,8 +242,9 @@ def load_judge_llm() -> Any:
     Le fournisseur est choisi par `LLM_PROVIDER` (.env, charge automatiquement
     ici) : "anthropic" (defaut, retro-compatible) ou "bedrock". Dans les deux
     cas, le resultat est un objet LangChain `BaseChatModel` compatible avec
-    `judge_answer()` (appel direct `.invoke(prompt)`) et avec
-    `ragas.llms.LangchainLLMWrapper` (cf. `load_ragas_judge_and_embeddings`).
+    `.invoke(prompt)`, configure a `temperature=0` (cf. docstring du module :
+    maximum de determinisme disponible, sans garantie bit-a-bit ; `top_p`
+    deliberement omis, incompatible avec `temperature` sur certains modeles).
 
     Returns:
         Une instance `ChatAnthropic` ou `ChatBedrockConverse` configuree.
@@ -230,6 +269,19 @@ def load_judge_llm() -> Any:
     )
 
 
+def judge_model_name() -> str:
+    """Nom du modele juge effectivement configure (pour le logguer dans le
+    rapport d'ablation - etape 4 : le juge doit rester identifiable et fixe
+    pour toute la duree d'une ablation)."""
+    import os
+
+    load_dotenv()
+    provider = os.environ.get(_JUDGE_PROVIDER_ENV_VAR, "anthropic").strip().lower()
+    if provider == "bedrock":
+        return os.environ.get(_BEDROCK_MODEL_ID_ENV_VAR, "")
+    return os.environ.get(_JUDGE_MODEL_ENV_VAR, "claude-haiku-4-5-20251001")
+
+
 def _load_anthropic_judge_llm() -> Any:
     """Charge le juge via l'API Anthropic directe (langchain-anthropic).
 
@@ -250,7 +302,9 @@ def _load_anthropic_judge_llm() -> Any:
         )
     model = os.environ.get(_JUDGE_MODEL_ENV_VAR, "claude-haiku-4-5-20251001")
 
-    return ChatAnthropic(model=model, api_key=api_key)
+    return ChatAnthropic(
+        model=model, api_key=api_key, temperature=_JUDGE_TEMPERATURE
+    )
 
 
 def _load_bedrock_judge_llm() -> Any:
@@ -289,224 +343,159 @@ def _load_bedrock_judge_llm() -> Any:
             "requise pour le juge Bedrock (LLM_PROVIDER=bedrock)."
         )
 
-    return ChatBedrockConverse(model_id=model_id, region_name=region)
-
-
-def _parse_judge_json(raw_text: str) -> dict[str, Any]:
-    """Extrait le JSON de la reponse du juge (tolere d'eventuelles balises markdown).
-
-    Args:
-        raw_text: Le texte brut renvoye par le juge.
-
-    Returns:
-        Le dict JSON parse.
-
-    Raises:
-        ValueError: Si aucun JSON valide n'a pu etre extrait.
-    """
-    text = raw_text.strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"reponse du juge sans JSON exploitable : {raw_text!r}")
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"JSON du juge invalide : {raw_text!r}") from exc
-
-
-def judge_answer(judge_llm: Any, question: str, context: str, answer: str) -> JudgeScore:
-    """Note une reponse (faithfulness, relevancy) via le juge LLM custom.
-
-    Args:
-        judge_llm: Le LLM juge (cf. `load_judge_llm`).
-        question: La question posee.
-        context: Le contexte fourni au generateur (chunks concatenes).
-        answer: La reponse produite par le generateur.
-
-    Returns:
-        Le `JudgeScore` (faithfulness, relevancy, reasoning).
-    """
-    prompt = _JUDGE_PROMPT_TEMPLATE.format(
-        question=question, context=context or "(no context retrieved)", answer=answer
-    )
-    response = judge_llm.invoke(prompt)
-    payload = _parse_judge_json(response.content)
-
-    return JudgeScore(
-        faithfulness=float(payload["faithfulness"]),
-        relevancy=float(payload["relevancy"]),
-        reasoning=str(payload.get("reasoning", "")),
+    return ChatBedrockConverse(
+        model_id=model_id, region_name=region, temperature=_JUDGE_TEMPERATURE
     )
 
 
-def custom_judge_eval(judge_llm: Any, results: list[GenerationResult]) -> dict[str, JudgeScore]:
-    """Note chaque resultat de generation avec le juge LLM custom.
+def extract_claims(answer: str, judge: Any) -> list[str]:
+    """Decoupe une reponse en affirmations atomiques (un appel LLM).
 
     Args:
-        judge_llm: Le LLM juge (cf. `load_judge_llm`).
+        answer: Le texte de la reponse generee.
+        judge: Le LLM juge (cf. `load_judge_llm`).
+
+    Returns:
+        Les affirmations extraites (liste vide si aucune affirmation
+        factuelle - ex : une abstention pure).
+    """
+    prompt = _CLAIM_EXTRACTION_PROMPT.format(answer=answer)
+    response = judge.invoke(prompt)
+    return [line.strip() for line in response.content.strip().splitlines() if line.strip()]
+
+
+def judge_claim(claim: str, context: str, judge: Any) -> bool:
+    """Verifie si une affirmation est appuyee par le contexte (un appel LLM).
+
+    Args:
+        claim: L'affirmation a verifier.
+        context: Le contexte REELLEMENT fourni au generateur (jamais le
+            gold, jamais le corpus entier).
+        judge: Le LLM juge.
+
+    Returns:
+        True si le juge repond "APPUYEE".
+    """
+    prompt = _CLAIM_VERIFICATION_PROMPT.format(
+        context=context or "(no context retrieved)", claim=claim
+    )
+    response = judge.invoke(prompt)
+    return response.content.strip().upper().startswith("APPUYEE")
+
+
+def faithfulness(answer: str, context: str, judge: Any) -> FaithfulnessResult:
+    """Anti-hallucination : proportion des affirmations de `answer` appuyees par `context`.
+
+    Args:
+        answer: Le texte de la reponse generee.
+        context: Le contexte REELLEMENT fourni au generateur.
+        judge: Le LLM juge.
+
+    Returns:
+        `FaithfulnessResult(score=None, n_claims=0)` si aucune affirmation
+        n'a ete extraite (jamais `score=1.0` par defaut : une reponse vide
+        ne contredit jamais le contexte, ce n'est pas la meme chose qu'une
+        reponse parfaitement fidele - cf. docstring de `FaithfulnessResult`).
+    """
+    claims = extract_claims(answer, judge)
+    if not claims:
+        return FaithfulnessResult(score=None, n_claims=0)
+    supported = sum(1 for claim in claims if judge_claim(claim, context, judge))
+    return FaithfulnessResult(score=supported / len(claims), n_claims=len(claims))
+
+
+def judge_coverage(key_point: str, answer: str, judge: Any) -> bool:
+    """Verifie si `key_point` est couvert par `answer`, meme reformule (un appel LLM)."""
+    prompt = _COVERAGE_PROMPT.format(key_point=key_point, answer=answer)
+    response = judge.invoke(prompt)
+    return response.content.strip().upper().startswith("COUVERT")
+
+
+def answer_correctness(case_id: str, key_points: list[str], answer: str, judge: Any) -> AnswerCorrectnessResult:
+    """Anti-omission : proportion des `key_points` du gold couverts par `answer`.
+
+    Args:
+        case_id: Identifiant du cas (prefixe des ids de key_point rapportes,
+            ex : "q1-kp1").
+        key_points: Les affirmations de reference du gold set pour ce cas.
+        answer: Le texte de la reponse generee.
+        judge: Le LLM juge.
+
+    Returns:
+        `AnswerCorrectnessResult(score=None, ...)` si `key_points` est vide
+        (cas negatif hors-corpus : rien a couvrir, la metrique ne s'applique
+        pas). Sinon le score de couverture et les ids des key_points NON
+        couverts (signal le plus actionnable du rapport - etape 5).
+    """
+    if not key_points:
+        return AnswerCorrectnessResult(score=None, n_covered=0, n_total=0, uncovered_key_point_ids=[])
+
+    uncovered: list[str] = []
+    covered = 0
+    for index, key_point in enumerate(key_points, start=1):
+        kp_id = f"{case_id}-kp{index}"
+        if judge_coverage(key_point, answer, judge):
+            covered += 1
+        else:
+            uncovered.append(kp_id)
+
+    return AnswerCorrectnessResult(
+        score=covered / len(key_points),
+        n_covered=covered,
+        n_total=len(key_points),
+        uncovered_key_point_ids=uncovered,
+    )
+
+
+@dataclass
+class CaseJudgment:
+    """Jugement complet (les 2 metriques) d'un `GenerationResult`."""
+
+    id: str
+    faithfulness: FaithfulnessResult
+    correctness: AnswerCorrectnessResult
+
+
+def judge_results(judge: Any, results: list[GenerationResult]) -> dict[str, CaseJudgment]:
+    """Note chaque resultat de generation avec les 2 metriques orthogonales.
+
+    Args:
+        judge: Le LLM juge (cf. `load_judge_llm`).
         results: Les resultats de generation a noter.
 
     Returns:
-        {case_id: JudgeScore}.
+        {case_id: CaseJudgment}.
     """
-    return {
-        r.id: judge_answer(judge_llm, r.question, "\n\n".join(r.contexts), r.answer_text)
-        for r in results
-    }
-
-
-class _LangchainCompatibleEmbeddings:
-    """Adapte un `Embedder` du projet a l'interface LangChain (embed_query/embed_documents).
-
-    RAGAS exige cette interface pour `answer_relevancy` (verifie en direct) ;
-    elle n'existe pas sur le port `Embedder` du projet (`embed`/`embed_query`).
-    """
-
-    def __init__(self, embedder: Any) -> None:
-        self._embedder = embedder
-
-    def embed_query(self, text: str) -> list[float]:
-        return self._embedder.embed_query(text)
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return self._embedder.embed(texts)
-
-
-def load_ragas_judge_and_embeddings(embedding_config: dict[str, Any]) -> tuple[Any, Any]:
-    """Construit le LLM juge et l'embedder LOCAL passes explicitement a RAGAS.
-
-    Args:
-        embedding_config: Section de configuration `embedding` (cf.
-            `config/default.yaml`), utilisee pour charger le MEME embedder
-            local que le systeme RAG (jamais OpenAI).
-
-    Returns:
-        (llm, embeddings) prets a passer a `ragas.evaluate(..., llm=, embeddings=)`.
-    """
-    from ragas.embeddings import LangchainEmbeddingsWrapper
-    from ragas.llms import LangchainLLMWrapper
-
-    from src.adapters.embedding.factory import create_embedder
-
-    judge_llm = LangchainLLMWrapper(load_judge_llm())
-    embedder = create_embedder(embedding_config)
-    judge_embeddings = LangchainEmbeddingsWrapper(_LangchainCompatibleEmbeddings(embedder))
-
-    return judge_llm, judge_embeddings
-
-
-def ragas_eval(
-    results: list[GenerationResult], judge_llm: Any, judge_embeddings: Any
-) -> dict[str, dict[str, float]]:
-    """Evalue les resultats de generation via RAGAS (faithfulness, answer_relevancy,
-    context_precision, context_recall).
-
-    Les deux dernieres metriques necessitent une `reference` : les cas qui
-    n'en ont pas (ex: cas negatifs hors-corpus) ne recoivent que
-    faithfulness/answer_relevancy.
-
-    Args:
-        results: Les resultats de generation a evaluer.
-        judge_llm: LLM juge deja enveloppe pour RAGAS (cf.
-            `load_ragas_judge_and_embeddings`).
-        judge_embeddings: Embedder local deja enveloppe pour RAGAS.
-
-    Returns:
-        {case_id: {metric_name: score}}.
-    """
-    from ragas import EvaluationDataset, evaluate
-    from ragas.metrics import answer_relevancy, context_precision, context_recall, faithfulness
-
-    scores: dict[str, dict[str, float]] = {r.id: {} for r in results}
-
-    with_reference = [r for r in results if r.reference]
-    without_reference = [r for r in results if not r.reference]
-
-    if with_reference:
-        dataset = EvaluationDataset.from_list(
-            [
-                {
-                    "user_input": r.question,
-                    "response": r.answer_text,
-                    "retrieved_contexts": r.contexts or [""],
-                    "reference": r.reference,
-                }
-                for r in with_reference
-            ]
+    judgments: dict[str, CaseJudgment] = {}
+    for result in results:
+        context = "\n\n".join(result.contexts)
+        judgments[result.id] = CaseJudgment(
+            id=result.id,
+            faithfulness=faithfulness(result.answer_text, context, judge),
+            correctness=answer_correctness(result.id, result.key_points, result.answer_text, judge),
         )
-        result = evaluate(
-            dataset=dataset,
-            metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
-            llm=judge_llm,
-            embeddings=judge_embeddings,
-        )
-        for r, row in zip(with_reference, result.to_pandas().to_dict(orient="records")):
-            scores[r.id].update(
-                {
-                    "faithfulness": row["faithfulness"],
-                    "answer_relevancy": row["answer_relevancy"],
-                    "context_precision": row["context_precision"],
-                    "context_recall": row["context_recall"],
-                }
-            )
-
-    if without_reference:
-        dataset = EvaluationDataset.from_list(
-            [
-                {
-                    "user_input": r.question,
-                    "response": r.answer_text,
-                    "retrieved_contexts": r.contexts or [""],
-                }
-                for r in without_reference
-            ]
-        )
-        result = evaluate(
-            dataset=dataset,
-            metrics=[faithfulness, answer_relevancy],
-            llm=judge_llm,
-            embeddings=judge_embeddings,
-        )
-        for r, row in zip(without_reference, result.to_pandas().to_dict(orient="records")):
-            scores[r.id].update(
-                {"faithfulness": row["faithfulness"], "answer_relevancy": row["answer_relevancy"]}
-            )
-
-    return scores
+    return judgments
 
 
-def to_markdown_table(
-    results: list[GenerationResult],
-    custom_scores: dict[str, JudgeScore],
-    ragas_scores: dict[str, dict[str, float]],
-) -> str:
-    """Formate un tableau Markdown recapitulatif (juge custom + RAGAS) par cas."""
+def to_markdown_table(results: list[GenerationResult], judgments: dict[str, CaseJudgment]) -> str:
+    """Formate un tableau Markdown recapitulatif (faithfulness + answer_correctness) par cas."""
     lines = [
-        "| ID | Abstained | Faithfulness (custom) | Relevancy (custom) | "
-        "Faithfulness (RAGAS) | Answer Relevancy | Context Precision | Context Recall |",
-        "|---|---|---|---|---|---|---|---|",
+        "| ID | Abstained | Faithfulness | N Claims | Answer Correctness | KP couverts/total |",
+        "|---|---|---|---|---|---|",
     ]
     for r in results:
-        c = custom_scores.get(r.id)
-        g = ragas_scores.get(r.id, {})
+        j = judgments[r.id]
+        faith = "n/a" if j.faithfulness.score is None else f"{j.faithfulness.score:.2f}"
+        correct = "n/a" if j.correctness.score is None else f"{j.correctness.score:.2f}"
         lines.append(
-            f"| {r.id} | {r.abstained} | "
-            f"{c.faithfulness:.2f} | {c.relevancy:.2f} | "
-            f"{g.get('faithfulness', float('nan')):.2f} | "
-            f"{g.get('answer_relevancy', float('nan')):.2f} | "
-            f"{g.get('context_precision', float('nan')):.2f} | "
-            f"{g.get('context_recall', float('nan')):.2f} |"
+            f"| {r.id} | {r.abstained} | {faith} | {j.faithfulness.n_claims} | "
+            f"{correct} | {j.correctness.n_covered}/{j.correctness.n_total} |"
         )
     return "\n".join(lines)
 
 
-def write_csv(
-    results: list[GenerationResult],
-    custom_scores: dict[str, JudgeScore],
-    ragas_scores: dict[str, dict[str, float]],
-    path: Path,
-) -> None:
-    """Ecrit le tableau recapitulatif (juge custom + RAGAS) en CSV."""
+def write_csv(results: list[GenerationResult], judgments: dict[str, CaseJudgment], path: Path) -> None:
+    """Ecrit le tableau recapitulatif (faithfulness + answer_correctness) en CSV."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -514,27 +503,26 @@ def write_csv(
             [
                 "id",
                 "abstained",
-                "faithfulness_custom",
-                "relevancy_custom",
-                "faithfulness_ragas",
-                "answer_relevancy_ragas",
-                "context_precision_ragas",
-                "context_recall_ragas",
+                "faithfulness",
+                "n_claims",
+                "answer_correctness",
+                "n_key_points_covered",
+                "n_key_points_total",
+                "uncovered_key_point_ids",
             ]
         )
         for r in results:
-            c = custom_scores.get(r.id)
-            g = ragas_scores.get(r.id, {})
+            j = judgments[r.id]
             writer.writerow(
                 [
                     r.id,
                     r.abstained,
-                    c.faithfulness,
-                    c.relevancy,
-                    g.get("faithfulness", ""),
-                    g.get("answer_relevancy", ""),
-                    g.get("context_precision", ""),
-                    g.get("context_recall", ""),
+                    "" if j.faithfulness.score is None else j.faithfulness.score,
+                    j.faithfulness.n_claims,
+                    "" if j.correctness.score is None else j.correctness.score,
+                    j.correctness.n_covered,
+                    j.correctness.n_total,
+                    ";".join(j.correctness.uncovered_key_point_ids),
                 ]
             )
 
@@ -560,15 +548,12 @@ def main() -> None:
     cases = load_gold_cases() + negative_cases()
     results = run_pipeline_on_cases(pipeline, cases)
 
-    judge_llm_raw = load_judge_llm()
-    custom_scores = custom_judge_eval(judge_llm_raw, results)
+    judge = load_judge_llm()
+    judgments = judge_results(judge, results)
 
-    ragas_llm, ragas_embeddings = load_ragas_judge_and_embeddings(config["embedding"])
-    ragas_scores = ragas_eval(results, ragas_llm, ragas_embeddings)
+    print(to_markdown_table(results, judgments))
 
-    print(to_markdown_table(results, custom_scores, ragas_scores))
-
-    write_csv(results, custom_scores, ragas_scores, _DEFAULT_RESULTS_CSV_PATH)
+    write_csv(results, judgments, _DEFAULT_RESULTS_CSV_PATH)
     print(f"\nResultats CSV ecrits dans {_DEFAULT_RESULTS_CSV_PATH}")
 
 
