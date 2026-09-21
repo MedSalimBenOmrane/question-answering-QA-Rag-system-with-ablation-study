@@ -1,0 +1,59 @@
+# Multi-stage build for Streamlit UI
+FROM python:3.13-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+RUN pip install --no-cache-dir uv==0.4.0
+
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies
+RUN uv sync --frozen --no-dev
+
+# Final stage
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python environment
+COPY --from=builder /app/.venv /app/.venv
+
+# Copy only necessary files for UI
+COPY src/ui/ ./src/ui/
+COPY src/prompts/ ./src/prompts/
+COPY src/domain/ ./src/domain/
+COPY src/adapters/ ./src/adapters/
+COPY src/application/ ./src/application/
+COPY src/cli.py ./src/cli.py
+COPY config/ ./config/
+
+# Set environment variables
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+
+# Expose Streamlit port
+EXPOSE 8501
+
+# Health check
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+
+# Run Streamlit
+CMD ["streamlit", "run", "src/ui/streamlit_app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true"]

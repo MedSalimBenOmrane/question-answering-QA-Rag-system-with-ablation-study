@@ -20,7 +20,7 @@ guardrails:
     max_length: 4000 # caracteres, reponse du LLM
 
 chunking:
-  strategy: fixed # fixed | recursive | markdown
+  strategy: markdown # OPTIMIZED: markdown chunking (respects document structure)
   fixed:
     chunk_size_tokens: 200
     overlap_tokens: 20
@@ -41,8 +41,8 @@ embedding:
     batch_size: 32
 
 llm:
-  model: qwen3:1.7b # modele Ollama cible ; comparaison en section 6.7 via config/experiments/llm_*.yaml
-  temperature: 0.1 # basse : reponses grounded/deterministes, peu d'hallucination
+  model: smollm2:1.7b # OPTIMIZED: best performing model (Faithfulness: 0.943, Correctness: 0.437)
+  temperature: 0.1
 
 vectorstore:
   persist_directory: ./data/chroma
@@ -57,33 +57,27 @@ retrieval:
     b: 0.75
   rrf_k: 60
 
+# OPTIMIZED: LLM reranker (Bedrock Claude Sonnet 4.6) - best precision (0.950)
+# NOTE: min_abs_score auto-adapts to 0.42 when provider=llm (see src/application/answer.py)
 reranking:
   enabled: true
-  model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
-  device: cpu
+  provider: llm
+  model_id: global.anthropic.claude-sonnet-4-6
+  region: eu-west-3
 
+# Selection with cross-encoder threshold
 selection:
-  strategy: relative_threshold # topk | relative_threshold
+  strategy: relative_threshold
   relative_threshold:
-    min_abs_score: 0.001 # plancher de bruit absolu (score de reranking)
-    # log_margin=2.0/drop_ratio=0.02 (au lieu de 1.5/0.20) : calibre pour ce
-    # reranker sur ce corpus - les scores "faibles mais reels" (chunks
-    # pertinents mais lexicalement eloignes de la question, ex: changelog_v4.md
-    # pour q1 a 0.0126, staff_bios.md pour q5 a 0.0274) sont ~15-25x plus bas
-    # que le meilleur score de leur question, bien au-dela de ce que
-    # log_margin=1.5/drop_ratio=0.20 laissait passer (bug reel constate :
-    # ces sources manquaient malgre un score de reranking non-bruit reel).
-    # Le bruit reel (~1e-5) reste 500x+ sous ces scores faibles : toujours
-    # filtre par min_abs_score et par ce plancher relatif, marge confortable.
-    log_margin: 2.0 # garde les scores > s_max / 10^log_margin (~100x au defaut)
-    drop_ratio: 0.02 # coupe au decrochage entre deux candidats consecutifs
-    max_chunks: 5 # plafond dur sur le nombre de chunks retenus
-    min_chunks: 1 # ne jamais renvoyer un contexte vide
+    min_abs_score: 0.012
+    log_margin: 2.0
+    drop_ratio: 0.02
+    max_chunks: 5
+    min_chunks: 1
 
 token_counter:
-  provider: hf # tiktoken | hf
+  provider: hf
   tiktoken:
     encoding: cl100k_base
   hf:
-    # Qwen3 reutilise le tokenizer Qwen2 (meme vocab) : doit rester aligne sur llm.model.
-    model_name: Qwen/Qwen3-1.7B
+    model_name: HuggingFaceTB/SmolLM2-1.7B # Aligned with llm.model

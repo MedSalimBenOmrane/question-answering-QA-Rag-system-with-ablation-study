@@ -456,6 +456,46 @@ class CaseJudgment:
     correctness: AnswerCorrectnessResult
 
 
+def evaluate_answer(
+    answer: Answer,
+    gold_case: GenerationCase,
+    judge: Any,
+    judge_model: str,
+) -> dict[str, Any]:
+    """Evaluate a single answer against a gold case.
+
+    Args:
+        answer: The Answer object from pipeline.run()
+        gold_case: The GenerationCase with question and key_points
+        judge: The judge LLM
+        judge_model: Judge model name (for logging)
+
+    Returns:
+        Dict with faithfulness, answer_correctness, and counts
+    """
+    # Build context from selected chunks (stored in meta)
+    context = "\n\n".join(answer.meta.get("selected_chunk_texts", []))
+
+    # Calculate faithfulness
+    faith_result = faithfulness(answer.text, context, judge)
+
+    # Calculate answer correctness
+    correctness_result = answer_correctness(
+        case_id=gold_case.id,
+        key_points=gold_case.key_points,
+        answer=answer.text,
+        judge=judge,
+    )
+
+    return {
+        "faithfulness": faith_result.score,
+        "n_claims_total": faith_result.n_claims,
+        "answer_correctness": correctness_result.score,
+        "n_key_points_covered": correctness_result.n_covered,
+        "n_key_points_total": correctness_result.n_total,
+    }
+
+
 def judge_results(judge: Any, results: list[GenerationResult]) -> dict[str, CaseJudgment]:
     """Note chaque resultat de generation avec les 2 metriques orthogonales.
 

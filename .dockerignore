@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv/
+ENV/
+env/
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov/
+.tox/
+*.cover
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Evaluation & Results
+eval/*.csv
+eval/*.json
+eval/phase*.csv
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Scripts
+scripts/
+
+# Temporary files
+*.log
+*.tmp
+temp/
+tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files (keep only essential data)
+data/backup/
+*.bak

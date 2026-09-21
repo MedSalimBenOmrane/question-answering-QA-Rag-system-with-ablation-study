@@ -1,0 +1,61 @@
+- id: q1
+  question: "If the QRC fails during boot, what is the expected system behavior and recommended recovery steps?"
+  type: multi_doc
+  relevant_sources:
+    - boot_sequence.md
+    - long_procedures.md
+    - changelog_v4.md
+  key_points:
+    - "If the QRC fails, the boot halts at phase 3 (AI Layer)."
+    - "Recovery follows the emergency startup procedure: cut power to Zones 1 and 4, activate SafeBoot via the Maintenance Shell, execute /opt/zshell/scripts/init_ai_safe.py, and inspect QRC diagnostic output with qrc_diag --trace."
+    - "If diagnostics fail, disable AI Layer autoload completely and reboot with a minimal profile."
+    - "v4.2 fixed the QRC startup hang during SafeBoot, but SafeBoot may still intermittently fail on initial attempts post-patch; monitor QRC logs for anomalies."
+    - "After successful boot, escalate privileges to Commander level to verify override routes, restore communications modules if Isolation Mode was triggered, and re-enable AI Layer only after successful network sync."
+
+- id: q2
+  question: "Explain the ambiguity around the term 'Safe Mode' and how it might affect operator decisions."
+  type: ambiguity
+  relevant_sources:
+    - ambiguous_safe_mode.md
+    - safe_modes.md
+    - network_policies.md
+    - boot_sequence.md
+  key_points:
+    - "Safe Mode has multiple meanings: in firmware v3.x it is a diagnostic state freezing AI decision-making while maintaining limited sensor input; in operational manuals it often refers to Isolation Mode, which cuts external communication; some technician notes describe it as a low-power state with network bridges active."
+    - "Safe Modes documentation lists conflicting definitions: Isolation cuts all external network bridges and is sometimes called Safe Mode in legacy docs, while in firmware v3.x Safe Mode may also refer to a diagnostic-only state where AI decisions are frozen, differing from Isolation."
+    - "Network policies state that in Safe Mode (ambiguous term), external bridges may remain active or be shut down depending on firmware version."
+    - "Boot sequence notes some legacy configs require AI Layer to start in all safe modes, contradicting official docs."
+    - "Users must confirm system version and exact meaning before executing Safe Mode commands; ambiguity has caused incidents where operators unintentionally left the system in an unintended state."
+
+- id: q3
+  question: "What contradictions exist in network policies regarding AI outbound communication?"
+  type: contradiction
+  relevant_sources:
+    - network_policies.md
+  key_points:
+    - "Network policies state AI modules must not initiate outbound connections without Commander override, and internal telemetry uplinks are allowed."
+    - "The document explicitly notes a contradiction: some docs say Isolation disables outbound traffic; others note telemetry uplinks are exempt."
+    - "v3.x firmware mistakenly allowed redundant outbound packets causing leaks, fixed by Patch 7-F."
+    - "Emergency overrides can bypass all network restrictions, but only by Commander or AI Ethics Officer."
+
+- id: q4
+  question: "Describe the procedure to manually restore communications modules if Isolation Mode was triggered."
+  type: factual_specific
+  relevant_sources:
+    - long_procedures.md
+  key_points:
+    - "Step 7 of the emergency startup procedure states: manually restore communications modules if Isolation Mode was triggered."
+    - "This step occurs after successful boot and escalating privileges to Commander level to verify override routes."
+    - "The AI Layer should be re-enabled only after successful network sync."
+
+- id: q5
+  question: "Who is authorized to override network restrictions, and what conflicts might arise?"
+  type: multi_doc
+  relevant_sources:
+    - network_policies.md
+    - staff_bios.md
+  key_points:
+    - "Emergency overrides can bypass all network restrictions, but only by Commander or AI Ethics Officer."
+    - "Cmdr. Zhi Morales is the Station Commander known for occasionally overriding AI routines, sometimes causing QRC conflicts, and favors operational efficiency over strict protocol adherence."
+    - "Dr. Laren Doss is the AI Ethics Officer who advocates strict limits on AI autonomy in network operations."
+    - "Potential conflict: Morales may override network restrictions for efficiency, while Doss advocates strict limits, creating tension between operational efficiency and ethical constraints."

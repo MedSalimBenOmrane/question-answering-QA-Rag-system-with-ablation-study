@@ -1,0 +1,271 @@
+name: CD - Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image tag to deploy (commit SHA or latest)'
+        required: true
+        default: 'latest'
+        type: string
+
+env:
+  AWS_REGION: eu-west-3
+  ENVIRONMENT: prod
+
+jobs:
+  approval:
+    name: Manual Approval Required
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Request approval
+        run: |
+          echo "========================================="
+          echo "PRODUCTION DEPLOYMENT REQUEST"
+          echo "========================================="
+          echo "Version: ${{ github.event.inputs.version }}"
+          echo "Requester: ${{ github.actor }}"
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "========================================="
+          echo ""
+          echo "Approval required to proceed..."
+
+  deploy:
+    name: Deploy to Production
+    needs: approval
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Validate image exists in ECR
+        run: |
+          echo "Validating image: ${{ github.event.inputs.version }}"
+          aws ecr describe-images \
+            --repository-name rag-pipeline \
+            --image-ids imageTag=${{ github.event.inputs.version }} || exit 1
+          aws ecr describe-images \
+            --repository-name streamlit-ui \
+            --image-ids imageTag=${{ github.event.inputs.version }} || exit 1
+          echo "Images validated successfully!"
+
+      - name: Create deployment backup
+        run: |
+          echo "Creating backup of current production deployment..."
+          aws ecs describe-services \
+            --cluster rag-prod-cluster \
+            --services streamlit-ui-service-prod \
+            > prod-backup-$(date +%Y%m%d-%H%M%S).json
+          aws s3 cp prod-backup-*.json s3://rag-deployment-logs/prod/backups/
+
+      - name: Download current ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition streamlit-ui-prod \
+            --query taskDefinition > task-def-current.json
+
+      - name: Create new task definition with new image
+        run: |
+          jq '.containerDefinitions[0].image = "${{ steps.login-ecr.outputs.registry }}/streamlit-ui:${{ github.event.inputs.version }}"' \
+            task-def-current.json | \
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            > task-def-new.json
+
+      - name: Register new task definition
+        id: register-task
+        run: |
+          TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://task-def-new.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "NEW_TASK_ARN=$TASK_ARN" >> $GITHUB_OUTPUT
+          echo "Registered new task definition: $TASK_ARN"
+
+      - name: Blue/Green deployment - Update ECS service
+        run: |
+          echo "Starting Blue/Green deployment..."
+          aws ecs update-service \
+            --cluster rag-prod-cluster \
+            --service streamlit-ui-service-prod \
+            --task-definition ${{ steps.register-task.outputs.NEW_TASK_ARN }} \
+            --deployment-configuration "deploymentCircuitBreaker={enable=true,rollback=true},maximumPercent=200,minimumHealthyPercent=100" \
+            --force-new-deployment
+
+      - name: Wait for service stability
+        run: |
+          echo "Waiting for service to stabilize (this may take 5-10 minutes)..."
+          aws ecs wait services-stable \
+            --cluster rag-prod-cluster \
+            --services streamlit-ui-service-prod
+
+      - name: Update RAG Pipeline on EC2
+        run: |
+          echo "Updating RAG Pipeline on production EC2..."
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --instance-ids ${{ secrets.PROD_EC2_INSTANCE_ID }} \
+            --parameters 'commands=[
+              "echo \"Backing up current container...\"",
+              "docker commit rag-pipeline rag-pipeline-backup || true",
+              "docker pull ${{ steps.login-ecr.outputs.registry }}/rag-pipeline:${{ github.event.inputs.version }}",
+              "docker stop rag-pipeline || true",
+              "docker rm rag-pipeline || true",
+              "docker run -d --name rag-pipeline -p 8080:8080 \
+                -v /mnt/chroma:/data/chroma \
+                -e AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }} \
+                -e AWS_REGION=${{ env.AWS_REGION }} \
+                -e LOG_LEVEL=INFO \
+                --restart unless-stopped \
+                ${{ steps.login-ecr.outputs.registry }}/rag-pipeline:${{ github.event.inputs.version }}",
+              "sleep 10",
+              "docker ps | grep rag-pipeline || exit 1"
+            ]'
+
+      - name: Health check and validation
+        run: |
+          echo "Running health checks..."
+          sleep 30
+
+          TARGET_GROUP_ARN=$(aws elbv2 describe-target-groups \
+            --names rag-prod-tg \
+            --query 'TargetGroups[0].TargetGroupArn' \
+            --output text)
+
+          HEALTHY_COUNT=$(aws elbv2 describe-target-health \
+            --target-group-arn $TARGET_GROUP_ARN \
+            --query 'length(TargetHealthDescriptions[?TargetHealth.State==`healthy`])' \
+            --output text)
+
+          echo "Healthy targets: $HEALTHY_COUNT"
+          if [ "$HEALTHY_COUNT" -lt 2 ]; then
+            echo "ERROR: Not enough healthy targets, will rollback"
+            exit 1
+          fi
+
+          curl -f https://rag.${{ secrets.DOMAIN_NAME }}/health || exit 1
+          echo "Health checks passed!"
+
+      - name: Production smoke tests
+        run: |
+          echo "Running production smoke tests..."
+
+          response=$(echo '{"question":"Quelle est la configuration réseau par défaut?"}' | \
+            curl -s -X POST https://rag.${{ secrets.DOMAIN_NAME }}/api/ask \
+            -H "Content-Type: application/json" -d @-)
+
+          echo "$response" | jq -e '.answer' > /dev/null || exit 1
+          echo "$response" | jq -e '.sources[0]' > /dev/null || exit 1
+
+          echo "Production smoke tests passed!"
+
+      - name: Create deployment record
+        run: |
+          cat <<EOF > deployment-record.json
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "environment": "production",
+            "version": "${{ github.event.inputs.version }}",
+            "commit": "${{ github.sha }}",
+            "deployer": "${{ github.actor }}",
+            "task_definition": "${{ steps.register-task.outputs.NEW_TASK_ARN }}",
+            "status": "success"
+          }
+          EOF
+          aws s3 cp deployment-record.json s3://rag-deployment-logs/prod/$(date +%Y%m%d-%H%M%S).json
+
+      - name: Tag production release
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -a "prod-${{ github.event.inputs.version }}-$(date +%Y%m%d%H%M%S)" \
+            -m "Production deployment: ${{ github.event.inputs.version }}"
+          git push origin --tags || true
+
+      - name: Notify team of successful deployment
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "✅ Production Deployment Successful",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Successful* ✅\n\n*Version:* `${{ github.event.inputs.version }}`\n*Deployed by:* ${{ github.actor }}\n*Commit:* `${{ github.sha }}`\n*Time:* $(date -u +%Y-%m-%d\ %H:%M:%S) UTC\n\nAll health checks passed!"
+                  }
+                }
+              ]
+            }
+
+  rollback:
+    name: Rollback on Failure
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: failure()
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Rollback to previous task definition
+        run: |
+          echo "DEPLOYMENT FAILED - Initiating rollback..."
+
+          CURRENT_TASK=$(aws ecs describe-services \
+            --cluster rag-prod-cluster \
+            --services streamlit-ui-service-prod \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          PREVIOUS_REVISION=$(echo $CURRENT_TASK | grep -oP '\d+$' | awk '{print $1-1}')
+
+          aws ecs update-service \
+            --cluster rag-prod-cluster \
+            --service streamlit-ui-service-prod \
+            --task-definition streamlit-ui-prod:$PREVIOUS_REVISION
+
+          echo "Rolled back to revision: $PREVIOUS_REVISION"
+
+      - name: Notify team of rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "⚠️ Production Deployment Failed - Rolled Back",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Production Deployment Failed* ⚠️\n\n*Version:* `${{ github.event.inputs.version }}`\n*Status:* Rolled back to previous version\n*Action required:* Check logs and investigate failure"
+                  }
+                }
+              ]
+            }

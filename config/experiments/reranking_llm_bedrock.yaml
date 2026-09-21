@@ -1,0 +1,8 @@
+# Ablation Run 4: LLM Reranker vs cross-encoder
+# Auto-adaptation: min_abs_score switches to 0.42 when provider=llm (see answer.py)
+
+reranking:
+  enabled: true
+  provider: llm
+  model_id: global.anthropic.claude-sonnet-4-6
+  region: eu-west-3

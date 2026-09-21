@@ -1,0 +1,114 @@
+name: CD - Deploy to Dev
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-3
+  ENVIRONMENT: dev
+
+jobs:
+  deploy:
+    name: Deploy to Dev Environment
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download ECS task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition streamlit-ui-dev \
+            --query taskDefinition > task-definition.json
+
+      - name: Update task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: streamlit
+          image: ${{ steps.login-ecr.outputs.registry }}/streamlit-ui:latest
+
+      - name: Deploy to ECS Dev
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: streamlit-ui-service-dev
+          cluster: rag-dev-cluster
+          wait-for-service-stability: true
+
+      - name: Update RAG Pipeline on EC2
+        run: |
+          aws ssm send-command \
+            --document-name "AWS-RunShellScript" \
+            --instance-ids ${{ secrets.DEV_EC2_INSTANCE_ID }} \
+            --parameters 'commands=[
+              "docker pull ${{ steps.login-ecr.outputs.registry }}/rag-pipeline:latest",
+              "docker stop rag-pipeline || true",
+              "docker rm rag-pipeline || true",
+              "docker run -d --name rag-pipeline -p 8080:8080 \
+                -v /mnt/chroma:/data/chroma \
+                -e AWS_BEARER_TOKEN_BEDROCK=${{ secrets.BEDROCK_TOKEN }} \
+                -e AWS_REGION=${{ env.AWS_REGION }} \
+                --restart unless-stopped \
+                ${{ steps.login-ecr.outputs.registry }}/rag-pipeline:latest"
+            ]'
+
+      - name: Wait for services to stabilize
+        run: sleep 30
+
+      - name: Run smoke tests
+        run: |
+          echo "Testing health endpoint..."
+          curl -f https://rag-dev.${{ secrets.DOMAIN_NAME }}/health || exit 1
+
+          echo "Testing RAG API..."
+          echo '{"question":"Test question"}' | \
+            curl -f -X POST https://rag-dev.${{ secrets.DOMAIN_NAME }}/api/ask \
+            -H "Content-Type: application/json" -d @- || exit 1
+
+          echo "Smoke tests passed!"
+
+      - name: Create deployment record
+        run: |
+          echo "Deployment successful to Dev"
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> deployment.log
+          echo "Commit: ${{ github.sha }}" >> deployment.log
+          echo "Branch: ${{ github.ref_name }}" >> deployment.log
+          aws s3 cp deployment.log s3://rag-deployment-logs/dev/$(date +%Y%m%d-%H%M%S).log
+
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Deploy to Dev: ${{ job.status }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Deploy to Dev Environment*\nStatus: ${{ job.status }}\nCommit: `${{ github.sha }}`\nBranch: `${{ github.ref_name }}`\nAuthor: ${{ github.actor }}"
+                  }
+                }
+              ]
+            }

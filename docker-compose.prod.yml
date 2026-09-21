@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  rag-pipeline:
+    image: ${ECR_REGISTRY}/rag-pipeline:${IMAGE_TAG:-latest}
+    container_name: rag-pipeline
+    ports:
+      - "8080:8080"
+    volumes:
+      - /mnt/efs/chroma:/data/chroma
+      - /mnt/efs/config:/app/config:ro
+    environment:
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}
+      - AWS_REGION=${AWS_REGION}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - LOG_LEVEL=INFO
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: /ecs/rag-pipeline
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream-prefix: rag
+    restart: always
+    networks:
+      - rag-network
+
+  streamlit-ui:
+    image: ${ECR_REGISTRY}/streamlit-ui:${IMAGE_TAG:-latest}
+    container_name: streamlit-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - RAG_API_URL=http://rag-pipeline:8080
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}
+      - AWS_REGION=${AWS_REGION}
+      - LOG_LEVEL=INFO
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: /ecs/streamlit-ui
+        awslogs-region: ${AWS_REGION}
+        awslogs-stream-prefix: streamlit
+    depends_on:
+      - rag-pipeline
+    restart: always
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge

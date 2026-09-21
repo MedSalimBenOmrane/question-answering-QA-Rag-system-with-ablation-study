@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  rag-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.rag-pipeline
+    image: rag-pipeline:latest
+    container_name: rag-pipeline
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/chroma:/data/chroma
+      - ./config:/app/config:ro
+      - ./data/docs:/app/data/docs:ro
+    environment:
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}
+      - AWS_REGION=${AWS_REGION:-eu-west-3}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    restart: unless-stopped
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  streamlit-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    image: streamlit-ui:latest
+    container_name: streamlit-ui
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      - RAG_API_URL=${RAG_API_URL:-http://rag-pipeline:8080}
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}
+      - AWS_REGION=${AWS_REGION:-eu-west-3}
+    depends_on:
+      rag-pipeline:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  chroma-data:
+    driver: local

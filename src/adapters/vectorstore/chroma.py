@@ -21,6 +21,8 @@ class ChromaVectorStore:
             client: Client Chroma deja instancie (ex: `chromadb.PersistentClient`).
             collection_name: Nom de la collection a utiliser.
         """
+        self._client = client
+        self._collection_name = collection_name
         self._collection = client.get_or_create_collection(
             name=collection_name, metadata={"hnsw:space": "cosine"}
         )
@@ -47,6 +49,16 @@ class ChromaVectorStore:
             metadatas=[
                 {"source": c.source, "n_tokens": c.n_tokens, **c.metadata} for c in chunks
             ],
+        )
+
+    def reset(self) -> None:
+        """Delete and recreate the collection (clears all data)."""
+        try:
+            self._client.delete_collection(name=self._collection_name)
+        except Exception:
+            pass
+        self._collection = self._client.get_or_create_collection(
+            name=self._collection_name, metadata={"hnsw:space": "cosine"}
         )
 
     def search(self, query_vector: list[float], k: int) -> list[ScoredChunk]:

@@ -1,0 +1,124 @@
+name: CI - Build & Test
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+env:
+  PYTHON_VERSION: "3.13"
+  UV_VERSION: "0.4.0"
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: pip install uv==${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run linting (Ruff)
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Run unit tests
+        run: uv run pytest tests/ --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  build-images:
+    name: Build Docker Images
+    needs: [test, security-scan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: eu-west-3
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: image-tag
+        run: |
+          echo "TAG=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+          echo "LATEST=latest" >> $GITHUB_OUTPUT
+
+      - name: Build and push RAG Pipeline image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.TAG }}
+        run: |
+          docker build -f Dockerfile.rag-pipeline -t $ECR_REGISTRY/rag-pipeline:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/rag-pipeline:$IMAGE_TAG $ECR_REGISTRY/rag-pipeline:latest
+          docker push $ECR_REGISTRY/rag-pipeline:$IMAGE_TAG
+          docker push $ECR_REGISTRY/rag-pipeline:latest
+
+      - name: Build and push Streamlit UI image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.TAG }}
+        run: |
+          docker build -f Dockerfile.streamlit -t $ECR_REGISTRY/streamlit-ui:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/streamlit-ui:$IMAGE_TAG $ECR_REGISTRY/streamlit-ui:latest
+          docker push $ECR_REGISTRY/streamlit-ui:$IMAGE_TAG
+          docker push $ECR_REGISTRY/streamlit-ui:latest
+
+      - name: Tag commit with build info
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -a "build-${{ steps.image-tag.outputs.TAG }}" -m "Built images: ${{ steps.image-tag.outputs.TAG }}"
+          git push origin "build-${{ steps.image-tag.outputs.TAG }}" || true

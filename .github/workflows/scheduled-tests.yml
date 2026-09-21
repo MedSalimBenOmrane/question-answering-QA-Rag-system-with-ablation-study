@@ -1,0 +1,132 @@
+name: Scheduled Integration Tests
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.13"
+  UV_VERSION: "0.4.0"
+
+jobs:
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        environment: [dev, staging]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: pip install uv==${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run integration tests against ${{ matrix.environment }}
+        env:
+          TEST_ENV: ${{ matrix.environment }}
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK_TOKEN }}
+          AWS_REGION: eu-west-3
+        run: |
+          echo "Running integration tests against ${{ matrix.environment }}..."
+          uv run pytest tests/integration/ \
+            --env=${{ matrix.environment }} \
+            --junit-xml=integration-results-${{ matrix.environment }}.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-results-${{ matrix.environment }}
+          path: integration-results-${{ matrix.environment }}.xml
+
+      - name: Notify on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Scheduled Integration Tests Failed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Scheduled Integration Tests Failed* ⚠️\n\n*Environment:* ${{ matrix.environment }}\n*Time:* $(date -u +%Y-%m-%d\ %H:%M:%S) UTC\n\nCheck logs for details."
+                  }
+                }
+              ]
+            }
+
+  performance-benchmarks:
+    name: Run Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: pip install uv==${{ env.UV_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run performance benchmarks
+        env:
+          AWS_BEARER_TOKEN_BEDROCK: ${{ secrets.BEDROCK_TOKEN }}
+          AWS_REGION: eu-west-3
+        run: |
+          echo "Running performance benchmarks..."
+          uv run python -m eval.run_ablation
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: eval/*.csv
+
+      - name: Compare with baseline
+        run: |
+          if [ -f eval/baseline-metrics.csv ]; then
+            echo "Comparing with baseline..."
+            python scripts/compare_metrics.py eval/ablation_results.csv eval/baseline-metrics.csv
+          else
+            echo "No baseline found, skipping comparison"
+          fi
+
+      - name: Notify on performance regression
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "text": "Performance Regression Detected",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Performance Regression Detected* ⚠️\n\nBenchmarks show performance degradation. Review metrics."
+                  }
+                }
+              ]
+            }

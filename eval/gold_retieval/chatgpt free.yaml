@@ -1,0 +1,61 @@
+- id: q1
+  question: "If the QRC fails during boot, what is the expected system behavior and recommended recovery steps?"
+  type: multi_doc
+  relevant_sources:
+    - boot_sequence.md
+    - long_procedures.md
+    - changelog_v4.md
+  key_points:
+    - "If the QRC fails, the boot halts at phase 3, the AI Layer."
+    - "The emergency recovery procedure is to cut power to Zones 1 and 4, activate SafeBoot via the Maintenance Shell, execute `/opt/zshell/scripts/init_ai_safe.py`, and inspect QRC diagnostics with `qrc_diag --trace`."
+    - "If diagnostics fail, AI Layer autoload must be disabled completely and the system rebooted with a minimal profile."
+    - "Version 4.2 fixed the QRC startup hang during SafeBoot, although SafeBoot may still intermittently fail on initial post-patch attempts, so QRC logs should be monitored."
+    - "In v4.1 SafeBoot skips the AI Layer, while mission-critical AI dependency edge cases were fixed in version 4.2 and later."
+
+- id: q2
+  question: "Explain the ambiguity around the term 'Safe Mode' and how it might affect operator decisions."
+  type: ambiguity
+  relevant_sources:
+    - ambiguous_safe_mode.md
+    - safe_modes.md
+    - network_policies.md
+    - boot_sequence.md
+  key_points:
+    - "In firmware v3.x, 'Safe Mode' can mean a diagnostic state that freezes AI decision-making while maintaining limited sensor input."
+    - "In operational or legacy documentation, 'Safe Mode' can refer to Isolation Mode, which cuts external network bridges; some technician notes instead use the term for a low-power state with network bridges active."
+    - "Network behavior under 'Safe Mode' can therefore differ by firmware version: external bridges may remain active or be shut down."
+    - "Some legacy configurations require the AI Layer to start in all safe modes, contradicting the official documentation that SafeBoot skips the AI Layer in v4.1."
+    - "Operators must verify the system version and the exact meaning of 'Safe Mode' in the applicable documentation before executing commands, because the ambiguity has caused unintended system states."
+
+- id: q3
+  question: "What contradictions exist in network policies regarding AI outbound communication?"
+  type: contradiction
+  relevant_sources:
+    - network_policies.md
+  key_points:
+    - "AI modules must not initiate outbound connections without Commander override."
+    - "Internal telemetry uplinks are allowed."
+    - "The document states a contradiction: some documentation says Isolation disables outbound traffic, while other documentation notes that telemetry uplinks are exempt."
+    - "Firmware v3.x mistakenly allowed redundant outbound packets that caused leaks; this was fixed by Patch 7-F."
+
+- id: q4
+  question: "Describe the procedure to manually restore communications modules if Isolation Mode was triggered."
+  type: factual_specific
+  relevant_sources:
+    - long_procedures.md
+  key_points:
+    - "After a successful boot, privileges must be escalated to Commander level to verify override routes."
+    - "If Isolation Mode was triggered, the communications modules are then manually restored."
+    - "The AI Layer must be re-enabled only after successful network synchronization."
+
+- id: q5
+  question: "Who is authorized to override network restrictions, and what conflicts might arise?"
+  type: multi_doc
+  relevant_sources:
+    - network_policies.md
+    - staff_bios.md
+  key_points:
+    - "Emergency overrides can bypass all network restrictions, but only the Station Commander or the AI Ethics Officer is authorized to perform them."
+    - "Cmdr. Zhi Morales is the Station Commander and is known for occasionally overriding AI routines, sometimes causing QRC conflicts."
+    - "Dr. Laren Doss is the AI Ethics Officer and advocates strict limits on AI autonomy in network operations."
+    - "The differing approaches can create tension between operational overrides and strict constraints on AI network autonomy."

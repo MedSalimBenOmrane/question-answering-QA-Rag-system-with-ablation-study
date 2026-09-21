@@ -1,23 +1,11 @@
-"""Strategie de selection `relative_threshold` (port `Selector`).
+"""Relative threshold selection strategy (Selector port).
 
-Remplace les anciennes strategies par densite (`knapsack`/`knapsack_mmr`,
-retirees de `src/domain/budget.py`). Principe directeur : trois decisions
-distinctes, jamais fusionnees dans un seul critere.
+Three-phase approach:
+1. RANK: Sort by score (never by density/length)
+2. FILTER: Apply relative thresholds (log_margin, drop_ratio, max_chunks)
+3. PACK: Sequential by score until budget exhausted
 
-    PHASE 1 - ORDONNER     : par `score` pur (jamais la densite, jamais la
-                              longueur) - la densite corrompt l'ordre de
-                              PERTINENCE (un chunk long serait penalise
-                              proportionnellement a sa longueur).
-    PHASE 2 - SELECTIONNER : combien garder, par des criteres RELATIFS au
-                              meilleur score (`log_margin`, `drop_ratio`,
-                              `max_chunks`) - rend la decision independante
-                              de l'echelle de score d'un reranker donne,
-                              contrairement a un seuil absolu fixe.
-    PHASE 3 - PACKER       : faire tenir dans le budget de tokens. La
-                              densite (score / n_tokens) n'intervient QU'ICI,
-                              pour maximiser la pertinence totale sous budget.
-
-Module du domaine pur : aucune dependance externe.
+Pure domain module with no external dependencies.
 """
 
 from dataclasses import dataclass
@@ -28,24 +16,14 @@ from src.domain.models import Chunk, ScoredChunk
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    """Parametres numeriques de `RelativeThresholdSelector` (config-driven).
+    """Configuration for RelativeThresholdSelector.
 
     Attributes:
-        min_abs_score: Plancher de bruit absolu (calibrage herite de l'ancien
-            `_MIN_RELEVANCE_SCORE` : un score de reranking en dessous est
-            considere comme du bruit residuel, quel que soit le contexte).
-        log_margin: Marge logarithmique appliquee au meilleur score pour
-            obtenir le plancher RELATIF de la phase 2 (`floor = s_max *
-            10 ** -log_margin`) : ex. 1.5 conserve les scores superieurs a
-            environ 1/32e du meilleur score.
-        drop_ratio: Seuil de decrochage entre deux candidats consecutifs
-            (tries par score) : si `score[i] < score[i-1] * drop_ratio`, tous
-            les candidats a partir du rang i sont ecartes.
-        max_chunks: Plafond dur sur le nombre de chunks retenus a l'issue de
-            la phase 2 (avant le packing sous budget de la phase 3).
-        min_chunks: Nombre minimal de chunks a renvoyer : le selecteur ne
-            renvoie jamais un contexte vide tant qu'au moins un candidat a
-            ete fourni en entree.
+        min_abs_score: Absolute noise floor
+        log_margin: Relative floor (keep > s_max * 10^-log_margin)
+        drop_ratio: Drop-off threshold between consecutive candidates
+        max_chunks: Hard cap on retained chunks
+        min_chunks: Minimum chunks (never empty context if candidates exist)
     """
 
     min_abs_score: float = 1e-3
@@ -56,20 +34,13 @@ class SelectionConfig:
 
 
 class RelativeThresholdSelector:
-    """Selectionne les chunks par seuil RELATIF au meilleur score (cf. docstring du module).
+    """Chunk selection by relative threshold to best score.
 
-    Contrairement aux strategies par densite retirees, le classement (phase 1)
-    et le critere d'inclusion (phase 2) ne dependent jamais de `n_tokens` : la
-    densite ne sert qu'a maximiser l'usage du budget restant (phase 3), jamais
-    a decider QUELS chunks sont pertinents.
+    Ranking and filtering depend only on score. Packing is sequential by score
+    (no density sorting) to avoid sacrificing high-relevance chunks.
     """
 
     def __init__(self, config: SelectionConfig) -> None:
-        """Initialise le selecteur.
-
-        Args:
-            config: Parametres numeriques (cf. `SelectionConfig`).
-        """
         self._config = config
 
     def select(self, query: str, chunks: list[ScoredChunk], context_budget: int) -> list[Chunk]:
@@ -105,18 +76,14 @@ class RelativeThresholdSelector:
                 break
         kept = kept[: cfg.max_chunks]
 
-        # --- PHASE 3 : PACKER (densite UNIQUEMENT ici) ---
+        # --- PHASE 3 : PACKER (sequentiel par score) ---
         selected: list[ScoredChunk] = []
         total_tokens = 0
-        for scored in sorted(
-            kept, key=lambda scored: scored.score / max(scored.chunk.n_tokens, 1), reverse=True
-        ):
+        for scored in kept:  # kept est deja trie par score decroissant
             if total_tokens + scored.chunk.n_tokens <= context_budget:
                 selected.append(scored)
                 total_tokens += scored.chunk.n_tokens
 
-        # Ordre du prompt = ordre de pertinence (score), pas l'ordre de packing.
-        selected.sort(key=lambda scored: scored.score, reverse=True)
         fallback = ranked[: cfg.min_chunks]
         return [scored.chunk for scored in (selected or fallback)]
 

@@ -15,6 +15,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+from dotenv import load_dotenv
+
+# Charge les variables d'environnement depuis .env (credentials Bedrock, etc.)
+load_dotenv()
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # `streamlit run` execute ce fichier comme script principal : Python ajoute
@@ -121,12 +127,38 @@ def render_answer(question: str, answer: Answer, budget_total: int) -> None:
     if answer.sources:
         st.caption("Sources : " + ", ".join(answer.sources))
 
+    # Display all chunks with scores
+    reranked_details = answer.meta.get("reranked_chunks_details", [])
+    if reranked_details:
+        with st.expander(f"All chunks with scores ({len(reranked_details)} chunks)", expanded=True):
+            st.markdown("**Legend**: [X] = Used | [ ] = Filtered")
+
+            df_data = []
+            for chunk_info in reranked_details:
+                used_symbol = "[X]" if chunk_info["used"] else "[ ]"
+                df_data.append({
+                    "Used": used_symbol,
+                    "Rank": chunk_info["rank"],
+                    "Score": f"{chunk_info['score']:.6f}",
+                    "Source": chunk_info["source"],
+                    "Tokens": chunk_info["n_tokens"],
+                    "Preview": chunk_info["text_preview"]
+                })
+
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+            n_used = sum(1 for c in reranked_details if c["used"])
+            n_filtered = len(reranked_details) - n_used
+            st.caption(f"Stats: {n_used} used, {n_filtered} filtered")
+
+    # Used chunks (full text)
     chunk_ids = answer.selected_chunk_ids
     chunk_texts = answer.meta.get("selected_chunk_texts", [])
     chunk_ranks = answer.meta.get("selected_chunk_ranks", [])
-    with st.expander(f"Chunks utilises ({len(chunk_ids)})"):
+    with st.expander(f"Used chunks - Full text ({len(chunk_ids)})"):
         if not chunk_ids:
-            st.write("Aucun chunk retenu.")
+            st.write("No chunks selected.")
         for index, (chunk_id, text, rank) in enumerate(
             zip(chunk_ids, chunk_texts, chunk_ranks or [None] * len(chunk_ids)), start=1
         ):

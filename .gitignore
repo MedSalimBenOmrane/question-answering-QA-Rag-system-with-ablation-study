@@ -20,6 +20,10 @@ data/chunks.json
 *.log
 data/feedback.jsonl
 
+# Claude Code session files (do not commit)
+.claude/
+*.jsonl
+
 # Sauvegarde des fichiers originaux avant nettoyage (data_cleaning/clean_corpus.py)
 data_cleaning/originals_backup/
 eval/run_ablation_checkpoint.json

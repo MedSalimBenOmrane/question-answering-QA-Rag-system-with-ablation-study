@@ -45,8 +45,10 @@ def save_chunks(chunks: list[Chunk], path: Path) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_chunks(path: Path) -> list[Chunk]:
+def load_chunks(path: Path | str) -> list[Chunk]:
     """Recharge la liste des chunks indexes depuis le JSON persiste par `save_chunks`."""
+    if isinstance(path, str):
+        path = Path(path)
     payload = json.loads(path.read_text(encoding="utf-8"))
     return [Chunk(**item) for item in payload]
 

@@ -45,7 +45,19 @@ def build_pipeline(config: dict[str, Any], chunks: list[Chunk], system_prompt: s
     vectorstore = create_vectorstore(config["vectorstore"])
     retriever = create_retriever(config["retrieval"], embedder, vectorstore, chunks)
     reranker = create_reranker(config["reranking"])
-    selector = create_selector(config["selection"])
+
+    # Adapt selection threshold based on reranker scale
+    selection_config = config["selection"].copy()
+    if config["reranking"].get("enabled") and config["reranking"].get("provider") == "llm":
+        # LLM reranker uses 0.0-1.0 scale, requires higher threshold
+        if selection_config.get("strategy") == "relative_threshold":
+            selection_config = {**selection_config}
+            selection_config["relative_threshold"] = {
+                **selection_config.get("relative_threshold", {}),
+                "min_abs_score": 0.42
+            }
+
+    selector = create_selector(selection_config)
     llm = create_llm(
         config["llm"],
         system_prompt=system_prompt,

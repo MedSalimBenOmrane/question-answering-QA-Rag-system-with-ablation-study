@@ -56,7 +56,7 @@ from typing import Any
 import yaml
 
 SEED = 42
-N_REPETITIONS = 1  # temporaire (demande utilisateur) : 1 run d'essai avant les 3 repetitions definitives
+N_REPETITIONS = 3  
 _SIGNIFICANCE_STD_MULTIPLIER = 2
 _MIN_VALID_CONTEXT_RECALL = 0.98
 _NDCG_K = 10
@@ -475,8 +475,7 @@ def to_markdown_table(results: list[ExperimentResult]) -> str:
 
 
 def write_csv(results: list[ExperimentResult], path: Path) -> None:
-    """Ecrit les resultats (tries par composite decroissant, invalides en
-    dernier) en CSV, avec `_mean`/`_std` pour chaque metrique numerique."""
+    """Write results (sorted by composite score descending) to CSV with mean values only."""
     ordered = sorted(
         results, key=lambda r: (r.composite is None, -(r.composite or 0.0))
     )
@@ -488,12 +487,12 @@ def write_csv(results: list[ExperimentResult], path: Path) -> None:
             [
                 "name",
                 "changed_key",
-                "candidate_recall_mean", "candidate_recall_std",
-                "context_recall_mean", "context_recall_std",
-                "context_precision_mean", "context_precision_std",
-                "ndcg_at_10_mean", "ndcg_at_10_std",
-                "faithfulness_mean", "faithfulness_std",
-                "answer_correctness_mean", "answer_correctness_std",
+                "candidate_recall",
+                "context_recall",
+                "context_precision",
+                "ndcg_at_10",
+                "faithfulness",
+                "answer_correctness",
                 "n_claims_total",
                 "n_key_points_covered",
                 "n_key_points_total",
@@ -505,10 +504,8 @@ def write_csv(results: list[ExperimentResult], path: Path) -> None:
         for r in ordered:
             row: list[Any] = [r.name, ";".join(r.changed_keys) or "(baseline)"]
             for metric in (*_RETRIEVAL_METRIC_NAMES, "faithfulness", "answer_correctness"):
-                mean, std = r.metric_mean_std(metric)
-                row.extend([mean, std])
-            # n_claims_total / n_key_points_* : sommes sur les repetitions
-            # (pas des metriques [0,1] moyennables comme celles ci-dessus).
+                mean, _ = r.metric_mean_std(metric)
+                row.append(mean)
             row.append(sum(rep.n_claims_total for rep in r.repetitions))
             row.append(sum(rep.n_key_points_covered for rep in r.repetitions))
             row.append(sum(rep.n_key_points_total for rep in r.repetitions))

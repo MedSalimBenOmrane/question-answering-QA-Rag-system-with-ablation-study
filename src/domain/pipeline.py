@@ -160,12 +160,23 @@ class Pipeline:
             + self._token_counter.count(prompt)
             + self._token_counter.count(raw_answer)
         )
-        rerank_rank_of = {
-            scored.chunk.id: rank
-            for rank, scored in enumerate(
-                sorted(reranked, key=lambda scored: scored.score, reverse=True), start=1
-            )
-        }
+        reranked_sorted = sorted(reranked, key=lambda scored: scored.score, reverse=True)
+        rerank_rank_of = {scored.chunk.id: rank for rank, scored in enumerate(reranked_sorted, start=1)}
+        selected_ids_set = {chunk.id for chunk in selected}
+
+        # Liste complète des chunks reranked avec scores + indication utilisé/non
+        reranked_chunks_details = [
+            {
+                "chunk_id": scored.chunk.id,
+                "source": scored.chunk.source,
+                "score": round(scored.score, 6),
+                "n_tokens": scored.chunk.n_tokens,
+                "rank": rerank_rank_of[scored.chunk.id],
+                "used": scored.chunk.id in selected_ids_set,
+                "text_preview": scored.chunk.text[:100] + "..." if len(scored.chunk.text) > 100 else scored.chunk.text,
+            }
+            for scored in reranked_sorted
+        ]
 
         return Answer(
             text=raw_answer,
@@ -182,11 +193,9 @@ class Pipeline:
                 "selected_chunk_texts": [chunk.text for chunk in selected],
                 "selected_chunk_ranks": [rerank_rank_of[chunk.id] for chunk in selected],
                 "retrieved_sources": [scored.chunk.source for scored in retrieved],
-                "reranked_sources": [
-                    scored.chunk.source
-                    for scored in sorted(reranked, key=lambda scored: scored.score, reverse=True)
-                ],
+                "reranked_sources": [scored.chunk.source for scored in reranked_sorted],
                 "selected_sources": [chunk.source for chunk in selected],
+                "reranked_chunks_details": reranked_chunks_details,  # NOUVEAU
             },
         )
 
