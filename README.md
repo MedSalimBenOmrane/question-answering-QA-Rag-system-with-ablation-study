@@ -258,6 +258,3 @@ context-aware-qa/
 
 ---
 
-## License
-
-MIT
